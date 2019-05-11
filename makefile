@@ -1,6 +1,6 @@
 COMPILER = g++
 CCFLAGS = -Wall -Wextra -std=c++17 -O2
-LFLAGS = -lboost_program_options
+LFLAGS = -lboost_program_options -lboost_filesystem -lboost_system
 
 SRCS = netstore-client.cc netstore-server.cc
 OBJS = $(SRCS:.cc=.o)
