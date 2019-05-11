@@ -20,7 +20,7 @@ netstore-client : netstore-client.o
 		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-client.o -o netstore-client
 
 netstore-server : netstore-server.o
-		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-server
+		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-server.o -o netstore-server
 
 clean:
 		@rm -f $(OBJS) netstore-client netstore-server
