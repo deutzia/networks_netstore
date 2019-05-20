@@ -4,9 +4,6 @@
 
 #include "helper.h"
 
-// TODO(lab) jak mają się nazywać nasze binarki?
-// TODO(lab) czy -okatalog jest równoważne -o katalog? Czy oba są poprawne?
-
 std::string mcast_addr, out_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
 

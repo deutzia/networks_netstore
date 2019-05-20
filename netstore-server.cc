@@ -3,14 +3,19 @@
 #include <iostream>
 #include <string>
 
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+
 #include "helper.h"
 
-const int32_t MAX_SPACE_DEFAULT = 52428800;
+const int64_t MAX_SPACE_DEFAULT = 52428800;
 
 std::string mcast_addr, shrd_fldr;
-int32_t cmd_port, timeout = TIMEOUT_DEFAULT, max_space = MAX_SPACE_DEFAULT;
-
-// TODO(lab) czy maksymalna liczba bajtów udostępnianej przestrzeni dyskowej zmieści się w 31 bitach (int32_t)?
+int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
+int64_t max_space = MAX_SPACE_DEFAULT;
 
 void parse_args(int argc, char** argv,
         const boost::program_options::options_description& desc) {
@@ -37,6 +42,7 @@ void parse_args(int argc, char** argv,
     }
 }
 
+// returns list of files in shrd_fldr, without prefix (only filenames)
 std::vector<std::string> list_files() {
     namespace fs = boost::filesystem;
     std::vector<std::string> result;
@@ -57,6 +63,44 @@ std::vector<std::string> list_files() {
     return result;
 }
 
+Socket connect_to_mcast(std::string mcast_addr, int32_t port) {
+  /* opening a socket */
+  Socket sock(socket(AF_INET, SOCK_DGRAM, 0));
+  if (sock.sock < 0) {
+      throw std::logic_error("Failed to create a socket");
+  }
+
+  /* connecting to a local address and port */
+  struct sockaddr_in local_address;
+  local_address.sin_family = AF_INET;
+  local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+  local_address.sin_port = htons(port);
+  if (bind(sock.sock,
+          (struct sockaddr *)&local_address,
+          sizeof local_address) < 0) {
+    throw std::logic_error("Failed to connect to a local address and port");
+  }
+
+  /* connecting to multicast group */
+  struct ip_mreq ip_mreq;
+  ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  if (inet_aton(mcast_addr.c_str(), &ip_mreq.imr_multiaddr) == 0) {
+      throw boost::program_options::validation_error(
+              boost::program_options::validation_error::invalid_option_value,
+              "g", mcast_addr);
+  }
+
+  if (setsockopt(sock.sock,
+              IPPROTO_IP,
+              IP_ADD_MEMBERSHIP,
+              (void*)&ip_mreq,
+              sizeof ip_mreq) < 0) {
+      throw std::logic_error("Failed to connect to multicast group");
+  }
+
+  return sock;
+}
+
 int main(int argc, char** argv) {
     namespace po = boost::program_options;
     namespace fs = boost::filesystem;
@@ -66,17 +110,20 @@ int main(int argc, char** argv) {
         (",g", po::value<std::string>(&mcast_addr)->required(), "MCAST_ADDR")
         (",p", po::value<int32_t>(&cmd_port)->required(),
             "CMD_PORT (range [1, 65535]")
-        (",b", po::value<int32_t>(&max_space), "MAX_SPACE")
+        (",b", po::value<int64_t>(&max_space), "MAX_SPACE")
         (",f", po::value<std::string>(&shrd_fldr)->required(), "SHRD_FLDR")
         (",t", po::value<int32_t>(&timeout),
             "TIMEOUT (range [1, 300], default 5)");
+    std::vector<std::string> files;
+    Socket sock;
 
     try {
         parse_args(argc, argv, desc);
-        std::vector<std::string> files = list_files();
+        files = list_files();
         for (const auto& file : files) {
             std::cout << file << "\n";
         }
+        sock = connect_to_mcast(mcast_addr, cmd_port);
     }
     catch (po::error& e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
