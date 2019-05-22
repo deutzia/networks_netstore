@@ -1,7 +1,7 @@
 #include <iostream>
 
-#include <string>
 #include <arpa/inet.h>
+#include <string>
 #include <unistd.h>
 const int32_t TIMEOUT_DEFAULT = 5;
 const int32_t TIMEOUT_MAX = 300;
@@ -20,12 +20,12 @@ const std::string NO_WAY = "NO_WAY";
 const std::string CAN_ADD = "CAN_ADD";
 
 class Socket {
-public:
+  public:
     int sock;
-    Socket()
-    : sock(0) {}
-    Socket(int sock)
-    : sock(sock) {}
+    Socket() : sock(0) {
+    }
+    Socket(int sock) : sock(sock) {
+    }
 
     ~Socket() {
         if (sock > 0) {
@@ -35,15 +35,15 @@ public:
 };
 
 class ReceiveTimeOutException : public std::exception {
-private:
+  private:
     static const std::string what_;
-    virtual const char* what() const noexcept {
+    virtual const char *what() const noexcept {
         return what_.c_str();
     }
 };
 
 class simpl_cmd {
-public:
+  public:
     std::string cmd;
     uint64_t cmd_seq;
     std::string data;
@@ -63,11 +63,11 @@ struct cmplx_cmd {
 };
 
 // those functions do not split cmd, assume data fits in size of one udp packet
-void send_cmd(const simpl_cmd& cmd, int sock);
-void send_cmd(const cmplx_cmd& cmd, int sock);
+void send_cmd(const simpl_cmd &cmd, int sock);
+void send_cmd(const cmplx_cmd &cmd, int sock);
 
 // cmd is the result
 // if the command received was simpl_cmd, then param is equal to 0
-void recv_cmd(cmplx_cmd& cmd, int sock);
+void recv_cmd(cmplx_cmd &cmd, int sock);
 
 int64_t get_cmd_seq();
