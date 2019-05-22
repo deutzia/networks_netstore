@@ -193,15 +193,45 @@ int main(int argc, char **argv) {
     }
     while (true) {
         struct cmplx_cmd cmd;
-        recv_cmd(cmd, sock.sock);
+        try {
+            recv_cmd(cmd, sock.sock);
+        }
+        catch (std::runtime_error &e) {
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
+                          sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+            std::cerr << "[PCKG ERROR] Skipping invalid package from "
+                      << address << ":" << cmd.addr.sin_port << " (" << e.what()
+                      << ")\n";
+        }
+        catch (std::exception &e) {
+            std::cerr << "Error occured: " << e.what() << "\n";
+        }
         if (cmd.cmd == HELLO) {
-            reply_hello(sock.sock, cmd);
+            try {
+                reply_hello(sock.sock, cmd);
+            }
+            catch (std::exception &e) {
+                std::cerr << "Error occured: " << e.what() << "\n";
+            }
         }
         else if (cmd.cmd == LIST) {
-            reply_list(sock.sock, cmd, files);
+            try {
+                reply_list(sock.sock, cmd, files);
+            }
+            catch (std::exception &e) {
+                std::cerr << "Error occured: " << e.what() << "\n";
+            }
         }
         else if (cmd.cmd == DEL) {
-            handle_del(cmd, files);
+            try {
+                handle_del(cmd, files);
+            }
+            catch (std::exception &e) {
+                std::cerr << "Error occured: " << e.what() << "\n";
+            }
         }
         else {
             char address[INET_ADDRSTRLEN];
