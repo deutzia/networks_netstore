@@ -169,6 +169,16 @@ std::vector<std::string> search(int sock,
     return result;
 }
 
+void remove(int sock, const struct sockaddr_in& remote_address,
+        const std::string& filename) {
+    struct simpl_cmd cmd;
+    cmd.cmd = DEL;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.addr = remote_address;
+    cmd.data = filename;
+    send_cmd(cmd, sock);
+}
+
 int main(int argc, char** argv) {
     namespace po = boost::program_options;
     po::options_description desc(argv[0] + std::string(" flags"));
@@ -200,10 +210,11 @@ int main(int argc, char** argv) {
         }
 
         discover(sock.sock, remote_address);
-        const auto files = search(sock.sock, remote_address, "help");
+        const auto files = search(sock.sock, remote_address, "");
         for (const auto& file : files) {
             std::cout << file << "\n";
         }
+        remove(sock.sock, remote_address, "helper.o");
     }
     catch (po::error& e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;

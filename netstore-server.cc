@@ -154,6 +154,25 @@ void reply_list(int sock, const struct cmplx_cmd& cmd,
     }
 }
 
+void handle_del(const struct cmplx_cmd& cmd, std::vector<std::string>& files) {
+    namespace fs = boost::filesystem;
+    for (auto it = files.begin(); it != files.end(); ++it) {
+        if (*it == cmd.data) {
+            fs::path p(shrd_fldr + "/" + *it);
+            uint64_t change =  fs::file_size(p);
+            if (!fs::remove(p)) {
+                std::cerr << "Failed to remove "
+                    << shrd_fldr + "/" + *it << "\n";
+            } else {
+                max_space += change;
+                files.erase(it);
+            }
+            return;
+        }
+    }
+}
+
+
 int main(int argc, char** argv) {
     namespace po = boost::program_options;
     namespace fs = boost::filesystem;
@@ -199,6 +218,9 @@ int main(int argc, char** argv) {
         }
         else if (cmd.cmd == LIST) {
             reply_list(sock.sock, cmd, files);
+        }
+        else if (cmd.cmd == DEL) {
+            handle_del(cmd, files);
         }
         else {
             char address[INET_ADDRSTRLEN];
