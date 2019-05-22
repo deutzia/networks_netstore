@@ -2,7 +2,7 @@ COMPILER = g++
 CCFLAGS = -Wall -Wextra -std=c++17 -O2
 LFLAGS = -lboost_program_options -lboost_filesystem -lboost_system
 
-SRCS = netstore-client.cc netstore-server.cc
+SRCS = netstore-client.cc netstore-server.cc helper.cc
 OBJS = $(SRCS:.cc=.o)
 
 DEPDIR := .d
@@ -16,11 +16,11 @@ all: netstore-client netstore-server
 %.o : %.cc $(DEPDIR)/%.d
 		$(COMPILE.cc) $< -o $@
 
-netstore-client : netstore-client.o
-		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-client.o -o netstore-client
+netstore-client : netstore-client.o helper.o
+		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-client.o helper.o -o netstore-client
 
-netstore-server : netstore-server.o
-		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-server.o -o netstore-server
+netstore-server : netstore-server.o helper.o
+		$(COMPILER) $(CCFLAGS) $(LFLAGS) netstore-server.o helper.o -o netstore-server
 
 clean:
 		@rm -f $(OBJS) netstore-client netstore-server

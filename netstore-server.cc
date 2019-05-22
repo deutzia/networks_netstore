@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <errno.h>
 
 #include "helper.h"
 
@@ -63,12 +64,13 @@ std::vector<std::string> list_files() {
     return result;
 }
 
-Socket connect_to_mcast(std::string mcast_addr, int32_t port) {
+int connect_to_mcast(std::string mcast_addr, int32_t port) {
   /* opening a socket */
   Socket sock(socket(AF_INET, SOCK_DGRAM, 0));
   if (sock.sock < 0) {
       throw std::logic_error("Failed to create a socket");
   }
+  std::cout << "sock = " << sock.sock << "\n";
 
   /* connecting to a local address and port */
   struct sockaddr_in local_address;
@@ -98,7 +100,23 @@ Socket connect_to_mcast(std::string mcast_addr, int32_t port) {
       throw std::logic_error("Failed to connect to multicast group");
   }
 
-  return sock;
+  int result = sock.sock;
+  sock.sock = 0;
+
+  return result;
+}
+
+void read_packets(int sock) {
+    std::cerr << "reading packets...\n";
+    cmplx_cmd cmd;
+    char address[INET_ADDRSTRLEN];
+    while(true) {
+        recv_cmd(cmd, sock);
+        if (inet_ntop(AF_INET, (void*)(&cmd.addr.sin_addr), address, sizeof(address)) == NULL) {
+            throw std::logic_error("this should not be happening");
+        }
+        std::cout << "Received (" << cmd.cmd << ", " << cmd.cmd_seq << ", " << cmd.param << ", " << cmd.data << ") from " << address << "\n";
+    }
 }
 
 int main(int argc, char** argv) {
@@ -123,8 +141,10 @@ int main(int argc, char** argv) {
         for (const auto& file : files) {
             std::cout << file << "\n";
         }
-        sock = connect_to_mcast(mcast_addr, cmd_port);
+        sock.sock = connect_to_mcast(mcast_addr, cmd_port);
+        read_packets(sock.sock);
     }
+
     catch (po::error& e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
         return -1;
