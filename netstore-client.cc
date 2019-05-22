@@ -1,4 +1,5 @@
 #include <boost/program_options.hpp>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <iostream>
 #include <string>
 
@@ -39,7 +40,7 @@ struct sockaddr_in get_remote_address(const std::string& colon_address,
     return remote_address;
 }
 
-void send_packets(int sock, struct sockaddr_in remote_address) {
+void send_packets(int sock, const struct sockaddr_in& remote_address) {
     cmplx_cmd cmd;
     for (int i = 0; i < 10; ++i) {
         cmd.cmd = "CAN_ADD";
@@ -49,6 +50,58 @@ void send_packets(int sock, struct sockaddr_in remote_address) {
         cmd.addr = remote_address;
         send_cmd(cmd, sock);
     }
+}
+
+void discover(int sock, const struct sockaddr_in& remote_address) {
+    simpl_cmd cmd;
+    cmd.cmd = HELLO;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.addr = remote_address;
+    send_cmd(cmd, sock);
+
+    cmplx_cmd reply;
+    struct timeval tval;
+    auto start = boost::posix_time::microsec_clock::local_time();
+    do {
+        tval.tv_sec = timeout;
+        tval.tv_usec = 0;
+        auto elapsed = boost::posix_time::microsec_clock::local_time() - start;
+        int64_t total_microsec = elapsed.total_microseconds();
+        tval.tv_sec -= total_microsec / 1000000;
+        if (tval.tv_sec < 0) {
+            break;
+        }
+
+        if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (void *)&tval, sizeof(tval)) < 0) {
+	        throw std::logic_error("setsockopt " + std::to_string(errno) + " " + strerror(errno));
+        }
+        try {
+            recv_cmd(reply, sock);
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void*)(&reply.addr.sin_addr), address,
+                    sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+
+            if (reply.cmd_seq != cmd.cmd_seq) {
+                std::cerr <<  "[PCKG ERROR]  Skipping invalid package from "
+                    << address << ":" << reply.addr.sin_port
+                    << "(invalid cmd_seq)\n";
+                continue;
+            }
+            if (reply.cmd != GOOD_DAY) {
+                std::cerr <<  "[PCKG ERROR]  Skipping invalid package from "
+                    << address << ":" << reply.addr.sin_port
+                    << "(command is not GOOD_DAY when it should)\n";
+                continue;
+            }
+            std::cout << "Found " << address << " (" << reply.data
+                << ") with free space " << reply.param <<"\n";
+        }
+        catch (ReceiveTimeOutException& e) {
+            break;
+        }
+    } while (true);
 }
 
 int main(int argc, char** argv) {
@@ -81,14 +134,11 @@ int main(int argc, char** argv) {
             throw std::logic_error("Failed to connect to a local address and port");
         }
 
-        send_packets(sock.sock, remote_address);
+        discover(sock.sock, remote_address);
     }
     catch (po::error& e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
         return -1;
     }
-    std::cout << "mcast_addr = " << mcast_addr << "\n";
-    std::cout << "timeout = " << timeout << "\n";
-    std::cout << "cmd_port = " << cmd_port << "\n";
 }
 

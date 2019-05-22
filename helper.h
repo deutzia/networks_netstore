@@ -33,13 +33,21 @@ public:
     }
 };
 
+class ReceiveTimeOutException : public std::exception {
+private:
+    static const std::string what_;
+    virtual const char* what() const noexcept {
+        return what_.c_str();
+    }
+};
+
 class simpl_cmd {
 public:
     std::string cmd;
     uint64_t cmd_seq;
     std::string data;
 
-    // used to determine who to send to when sending, filled in when receiving
+    // used to determine who to send to when sending
     struct sockaddr_in addr;
 };
 
@@ -61,3 +69,4 @@ void send_cmd(const cmplx_cmd& cmd, int sock);
 // if the command received was simpl_cmd, then param is equal to 0
 void recv_cmd(cmplx_cmd& cmd, int sock);
 
+int64_t get_cmd_seq();

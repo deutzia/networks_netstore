@@ -72,6 +72,7 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
   }
   std::cout << "sock = " << sock.sock << "\n";
 
+  // TODO(lab) czy moga byc dwa serwery na tej samej maszynie na tym samym porcie?
   /* connecting to a local address and port */
   struct sockaddr_in local_address;
   local_address.sin_family = AF_INET;
@@ -119,6 +120,16 @@ void read_packets(int sock) {
     }
 }
 
+void reply_hello(int sock, const struct cmplx_cmd& cmd) {
+    struct cmplx_cmd reply;
+    reply.cmd = GOOD_DAY;
+    reply.cmd_seq = cmd.cmd_seq;
+    reply.param = max_space;
+    reply.data = mcast_addr;
+    reply.addr = cmd.addr;
+    send_cmd(reply, sock);
+}
+
 int main(int argc, char** argv) {
     namespace po = boost::program_options;
     namespace fs = boost::filesystem;
@@ -142,7 +153,6 @@ int main(int argc, char** argv) {
             std::cout << file << "\n";
         }
         sock.sock = connect_to_mcast(mcast_addr, cmd_port);
-        read_packets(sock.sock);
     }
 
     catch (po::error& e) {
@@ -156,6 +166,22 @@ int main(int argc, char** argv) {
     catch (std::exception& e) {
         std::cerr << "ERROR\n" << e.what() << "\n" << desc;
         return -1;
+    }
+    while (true) {
+        struct cmplx_cmd cmd;
+        recv_cmd(cmd, sock.sock);
+        if (cmd.cmd == HELLO) {
+            reply_hello(sock.sock, cmd);
+        }
+        else {
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void*)(&cmd.addr.sin_addr), address,
+                    sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+            std::cerr << "[PCKG ERROR] Skipping invalid package from "
+                << address <<":" << cmd.addr.sin_port;
+        }
     }
 }
 

@@ -8,6 +8,8 @@
 const int32_t BUFFER_SIZE = 65535;
 const uint32_t CMD_SIZE = 10;
 
+const std::string ReceiveTimeOutException::what_ = "Timeout while reading";
+
 void send_cmd(const simpl_cmd& cmd, int sock) {
     size_t size = CMD_SIZE + sizeof(cmd.cmd_seq) + cmd.data.size() + 1;
     char buffer[size];
@@ -59,6 +61,9 @@ void recv_cmd(cmplx_cmd& cmd, int sock) {
     socklen_t addrlen = sizeof(cmd.addr);
     if ((rcv_len = recvfrom(sock, buffer, BUFFER_SIZE, 0,
             (struct sockaddr*)(&cmd.addr), &addrlen)) < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            throw ReceiveTimeOutException();
+        }
         throw std::logic_error("Failed to receive");
     }
     if (addrlen > sizeof(cmd.addr)) {
@@ -79,5 +84,10 @@ void recv_cmd(cmplx_cmd& cmd, int sock) {
         cmd.param = 0;
     }
     cmd.data = std::string(buffer + CMD_SIZE + sizeof(cmd.cmd_seq) + sizeof(cmd.param));
+}
+
+int64_t get_cmd_seq() {
+    static int num = 0;
+    return ++num;
 }
 
