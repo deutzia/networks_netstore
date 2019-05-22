@@ -16,7 +16,6 @@ void send_cmd(const simpl_cmd& cmd, int sock) {
     memset(buffer, '\0', sizeof(buffer));
     strcpy(buffer, cmd.cmd.c_str());
     int64_t seq = htobe64(cmd.cmd_seq);
-    std::cerr << "cmd_seq = " << cmd.cmd_seq << " seq = " << seq << "\n";
     memcpy(buffer + CMD_SIZE, &seq, sizeof(seq));
     memcpy(buffer + CMD_SIZE + sizeof(cmd.cmd_seq), cmd.data.c_str(),
             cmd.data.size());
@@ -80,10 +79,11 @@ void recv_cmd(cmplx_cmd& cmd, int sock) {
     if (is_complex(cmd.cmd)) {
         memcpy(&tmp, buffer + CMD_SIZE + sizeof(tmp), sizeof(tmp));
         cmd.param = be64toh(tmp);
+        cmd.data = std::string(buffer + CMD_SIZE + sizeof(cmd.cmd_seq) + sizeof(cmd.param));
     } else {
         cmd.param = 0;
+        cmd.data = std::string(buffer + CMD_SIZE + sizeof(cmd.param));
     }
-    cmd.data = std::string(buffer + CMD_SIZE + sizeof(cmd.cmd_seq) + sizeof(cmd.param));
 }
 
 int64_t get_cmd_seq() {

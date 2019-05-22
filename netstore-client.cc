@@ -1,5 +1,6 @@
 #include <boost/program_options.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
+#include <boost/algorithm/string.hpp>
 #include <iostream>
 #include <string>
 
@@ -52,7 +53,11 @@ void send_packets(int sock, const struct sockaddr_in& remote_address) {
     }
 }
 
-void discover(int sock, const struct sockaddr_in& remote_address) {
+// returns servers, where first is sockaddr, and second is their free space
+std::vector<std::pair<struct sockaddr_in, int64_t>> discover(
+        int sock,
+        const struct sockaddr_in& remote_address) {
+    std::vector<std::pair<struct sockaddr_in, int64_t>> result;
     simpl_cmd cmd;
     cmd.cmd = HELLO;
     cmd.cmd_seq = get_cmd_seq();
@@ -95,6 +100,7 @@ void discover(int sock, const struct sockaddr_in& remote_address) {
                     << "(command is not GOOD_DAY when it should)\n";
                 continue;
             }
+            result.emplace_back(reply.addr, reply.param);
             std::cout << "Found " << address << " (" << reply.data
                 << ") with free space " << reply.param <<"\n";
         }
@@ -102,6 +108,65 @@ void discover(int sock, const struct sockaddr_in& remote_address) {
             break;
         }
     } while (true);
+    return result;
+}
+
+std::vector<std::string> search(int sock,
+        const struct sockaddr_in& remote_address,
+        const std::string& needle) {
+    std::vector<std::string> result;
+    simpl_cmd cmd;
+    cmd.cmd = LIST;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.addr = remote_address;
+    cmd.data = needle;
+    send_cmd(cmd, sock);
+
+    cmplx_cmd reply;
+    struct timeval tval;
+    auto start = boost::posix_time::microsec_clock::local_time();
+    do {
+        tval.tv_sec = timeout;
+        tval.tv_usec = 0;
+        auto elapsed = boost::posix_time::microsec_clock::local_time() - start;
+        int64_t total_microsec = elapsed.total_microseconds();
+        tval.tv_sec -= total_microsec / 1000000;
+        if (tval.tv_sec < 0) {
+            break;
+        }
+
+        if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (void *)&tval, sizeof(tval)) < 0) {
+	        throw std::logic_error("setsockopt " + std::to_string(errno) + " " + strerror(errno));
+        }
+        try {
+            recv_cmd(reply, sock);
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void*)(&reply.addr.sin_addr), address,
+                    sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+
+            if (reply.cmd_seq != cmd.cmd_seq) {
+                std::cerr <<  "[PCKG ERROR]  Skipping invalid package from "
+                    << address << ":" << reply.addr.sin_port
+                    << "(invalid cmd_seq)\n";
+                continue;
+            }
+            if (reply.cmd != MY_LIST) {
+                std::cerr <<  "[PCKG ERROR]  Skipping invalid package from "
+                    << address << ":" << reply.addr.sin_port
+                    << "(command is not MY_LIST when it should)\n";
+                continue;
+            }
+            std::vector<std::string> tmp;
+            boost::split(tmp, reply.data, [](char c) { return c == '\n';});
+            result.insert(result.end(), tmp.begin(), tmp.end());
+        }
+        catch (ReceiveTimeOutException& e) {
+            break;
+        }
+    } while (true);
+    return result;
 }
 
 int main(int argc, char** argv) {
@@ -135,6 +200,10 @@ int main(int argc, char** argv) {
         }
 
         discover(sock.sock, remote_address);
+        const auto files = search(sock.sock, remote_address, "help");
+        for (const auto& file : files) {
+            std::cout << file << "\n";
+        }
     }
     catch (po::error& e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;

@@ -70,7 +70,6 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
   if (sock.sock < 0) {
       throw std::logic_error("Failed to create a socket");
   }
-  std::cout << "sock = " << sock.sock << "\n";
 
   // TODO(lab) czy moga byc dwa serwery na tej samej maszynie na tym samym porcie?
   /* connecting to a local address and port */
@@ -130,6 +129,31 @@ void reply_hello(int sock, const struct cmplx_cmd& cmd) {
     send_cmd(reply, sock);
 }
 
+void reply_list(int sock, const struct cmplx_cmd& cmd,
+        std::vector<std::string> files) {
+    struct simpl_cmd reply;
+    reply.cmd = MY_LIST;
+    reply.cmd_seq = cmd.cmd_seq;
+    reply.addr = cmd.addr;
+    // TODO(lab) jak dobrze ograniczac rozmiar wysylanego pakietu
+    for (const auto& file : files) {
+        if (file.find(cmd.data) != std::string::npos) {
+            if (reply.data.size() + file.size() + (reply.data.empty() ? 0 : 1) >
+                    DATA_MAX) {
+                send_cmd(reply, sock);
+                reply.data = "";
+            }
+            if (!reply.data.empty()) {
+                reply.data += "\n";
+            }
+            reply.data += file;
+        }
+    }
+    if (reply.data.size() > 0) {
+        send_cmd(reply, sock);
+    }
+}
+
 int main(int argc, char** argv) {
     namespace po = boost::program_options;
     namespace fs = boost::filesystem;
@@ -173,6 +197,9 @@ int main(int argc, char** argv) {
         if (cmd.cmd == HELLO) {
             reply_hello(sock.sock, cmd);
         }
+        else if (cmd.cmd == LIST) {
+            reply_list(sock.sock, cmd, files);
+        }
         else {
             char address[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, (void*)(&cmd.addr.sin_addr), address,
@@ -180,7 +207,8 @@ int main(int argc, char** argv) {
                 throw std::logic_error("this should not be happening");
             }
             std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                << address <<":" << cmd.addr.sin_port;
+                << address <<":" << cmd.addr.sin_port << "(command "
+                << cmd.cmd << " is unknown)\n";
         }
     }
 }

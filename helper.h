@@ -6,6 +6,7 @@
 const int32_t TIMEOUT_DEFAULT = 5;
 const int32_t TIMEOUT_MAX = 300;
 const int32_t PORT_MAX = 65535;
+const int32_t DATA_MAX = 558;
 
 const std::string HELLO = "HELLO";
 const std::string GOOD_DAY = "GOOD_DAY";
