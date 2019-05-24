@@ -2,13 +2,13 @@
 #include <boost/program_options.hpp>
 #include <iostream>
 #include <string>
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <csignal>
 
 #include "helper.h"
 
@@ -17,6 +17,20 @@ const int64_t MAX_SPACE_DEFAULT = 52428800;
 std::string mcast_addr, shrd_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
 int64_t max_space = MAX_SPACE_DEFAULT;
+
+// global, shared among all threads, need to be cleaned up at exit
+std::vector<std::string> files;
+Socket sock;
+
+void interrupt_handler(int) {
+    std::cerr << "Received SIGINT, exiting\n";
+    // free the memory
+    files.clear();
+
+    close(sock.sock);
+    sock.sock = 0;
+    exit(0);
+}
 
 void parse_args(int argc, char **argv,
                 const boost::program_options::options_description &desc) {
@@ -154,7 +168,7 @@ void handle_del(const struct cmplx_cmd &cmd, std::vector<std::string> &files) {
     }
 }
 
-int main(int argc, char **argv) {
+void init(int argc, char **argv) {
     namespace po = boost::program_options;
     namespace fs = boost::filesystem;
 
@@ -167,8 +181,6 @@ int main(int argc, char **argv) {
         "MAX_SPACE")(",f", po::value<std::string>(&shrd_fldr)->required(),
                      "SHRD_FLDR")(",t", po::value<int32_t>(&timeout),
                                   "TIMEOUT (range [1, 300], default 5)");
-    std::vector<std::string> files;
-    Socket sock;
 
     try {
         parse_args(argc, argv, desc);
@@ -178,19 +190,25 @@ int main(int argc, char **argv) {
         }
         sock.sock = connect_to_mcast(mcast_addr, cmd_port);
     }
-
     catch (po::error &e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
-        return -1;
+        exit(-1);
     }
     catch (fs::filesystem_error &e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
-        return -1;
+        exit(-1);
     }
     catch (std::exception &e) {
         std::cerr << "ERROR\n" << e.what() << "\n" << desc;
-        return -1;
+        exit(-1);
     }
+}
+
+int main(int argc, char **argv) {
+    signal(SIGINT, interrupt_handler);
+
+    init(argc, argv);
+
     while (true) {
         struct cmplx_cmd cmd;
         try {
