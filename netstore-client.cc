@@ -99,10 +99,11 @@ discover(int sock, const struct sockaddr_in &remote_address) {
     return result;
 }
 
-std::vector<std::string> search(int sock,
-                                const struct sockaddr_in &remote_address,
-                                const std::string &needle) {
-    std::vector<std::string> result;
+// return pairs of <server addres, list of files there>
+std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
+search(int sock, const struct sockaddr_in &remote_address,
+       const std::string &needle) {
+    std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>> result;
     simpl_cmd cmd;
     cmd.cmd = LIST;
     cmd.cmd_seq = get_cmd_seq();
@@ -150,7 +151,7 @@ std::vector<std::string> search(int sock,
             }
             std::vector<std::string> tmp;
             boost::split(tmp, reply.data, [](char c) { return c == '\n'; });
-            result.insert(result.end(), tmp.begin(), tmp.end());
+            result.emplace_back(reply.addr, tmp);
         }
         catch (ReceiveTimeOutException &e) {
             break;
@@ -201,9 +202,16 @@ int main(int argc, char **argv) {
         }
 
         discover(sock.sock, remote_address);
-        const auto files = search(sock.sock, remote_address, "");
-        for (const auto &file : files) {
-            std::cout << file << "\n";
+        const auto files_list = search(sock.sock, remote_address, "");
+        for (const auto &package : files_list) {
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
+                          sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+            for (const auto &file : package.second) {
+                std::cout << file << " (" << address << ")\n";
+            }
         }
         remove(sock.sock, remote_address, "helper.o");
     }
