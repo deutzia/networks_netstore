@@ -3,7 +3,9 @@
 #include <boost/program_options.hpp>
 #include <csignal>
 #include <errno.h>
+#include <future>
 #include <iostream>
+#include <list>
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
@@ -21,14 +23,22 @@ int64_t max_space = MAX_SPACE_DEFAULT;
 // global, shared among all threads, need to be cleaned up at exit
 std::vector<std::string> files;
 Socket sock;
+std::set<int> active_sockets;
+std::list<std::future<bool>> active_futures;
 
 void interrupt_handler(int) {
     std::cerr << "Received SIGINT, exiting\n";
-    // free the memory
-    files.clear();
 
     close(sock.sock);
     sock.sock = 0;
+    for (int sock : active_sockets) {
+        close(sock);
+    }
+
+    // free the memory
+    files.clear();
+    active_sockets.clear();
+    active_futures.clear();
     exit(0);
 }
 
@@ -90,7 +100,7 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
     local_address.sin_port = htons(port);
     if (bind(sock.sock, (struct sockaddr *)&local_address,
-             sizeof local_address) < 0) {
+             sizeof(local_address)) < 0) {
         throw std::logic_error("Failed to connect to a local address and port");
     }
 
@@ -104,7 +114,7 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
     }
 
     if (setsockopt(sock.sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void *)&ip_mreq,
-                   sizeof ip_mreq) < 0) {
+                   sizeof(ip_mreq)) < 0) {
         throw std::logic_error("Failed to connect to multicast group");
     }
 
@@ -125,7 +135,7 @@ void reply_hello(int sock, const struct cmplx_cmd &cmd) {
 }
 
 void reply_list(int sock, const struct cmplx_cmd &cmd,
-                std::vector<std::string> files) {
+                const std::vector<std::string> &files) {
     struct simpl_cmd reply;
     reply.cmd = MY_LIST;
     reply.cmd_seq = cmd.cmd_seq;
@@ -168,6 +178,72 @@ void handle_del(const struct cmplx_cmd &cmd, std::vector<std::string> &files) {
     }
 }
 
+void reply_get(int sock, const struct cmplx_cmd &cmd,
+               std::vector<std::string> files) {
+    namespace fs = boost::filesystem;
+
+    bool have_file = false;
+    for (const auto &file : files) {
+        if (file == cmd.data) {
+            have_file = true;
+            break;
+        }
+    }
+    if (!have_file) {
+        char address[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
+                      sizeof(address)) == NULL) {
+            throw std::logic_error("this should not be happening");
+        }
+        std::cerr << "[PCKG ERROR] Skipping invalid package from " << address
+                  << ":" << cmd.addr.sin_port
+                  << ". (Requested file does not exist)\n";
+        return;
+    }
+
+    auto f = std::async(std::launch::async, [&cmd, sock]() {
+        struct cmplx_cmd reply;
+        reply.cmd = CONNECT_ME;
+        reply.data = cmd.data;
+        int new_socket = socket(AF_INET, SOCK_DGRAM, 0);
+        active_sockets.insert(new_socket);
+
+        struct sockaddr_in local_address;
+        local_address.sin_family = AF_INET;
+        local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+        local_address.sin_port = htons(0);
+        if (bind(new_socket, (struct sockaddr *)&local_address,
+                 sizeof(local_address)) < 0) {
+            close(new_socket);
+            active_sockets.erase(new_socket);
+            throw std::logic_error("Faled to bind new socket");
+        }
+        reply.param = local_address.sin_port;
+        std::cout << "Waiting for new connection on port " << local_address.sin_port << "\n";
+        send_cmd(reply, sock);
+
+        // switch to listening (passive open)
+        if (listen(new_socket, 1) < 0) {
+            close(new_socket);
+            active_sockets.erase(new_socket);
+            throw std::logic_error("Faled to switch to listening on a new socket");
+        }
+
+        struct timeval tv;
+        tv.tv_sec = timeout;
+        tv.tv_usec = 0;
+        // TODO(I) zrobić, to co jest w scenariuszu
+        if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (void *)&tv,
+                       sizeof(tv)) < 0) {
+            close(new_socket);
+            active_sockets.erase(new_socket);
+            throw std::logic_error("Failed to set writing timeout");
+        }
+        return true;
+    });
+    active_futures.push_back(std::move(f));
+}
+
 void init(int argc, char **argv) {
     namespace po = boost::program_options;
     namespace fs = boost::filesystem;
@@ -205,7 +281,9 @@ void init(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    // TODO potencjalnie chcę to robić pollem i nie mieć wątków
     signal(SIGINT, interrupt_handler);
+    signal(SIGPIPE, SIG_IGN);
 
     init(argc, argv);
 
@@ -221,12 +299,13 @@ int main(int argc, char **argv) {
                 throw std::logic_error("this should not be happening");
             }
             std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                      << address << ":" << cmd.addr.sin_port << " (" << e.what()
-                      << ")\n";
+                      << address << ":" << cmd.addr.sin_port << ". ("
+                      << e.what() << ")\n";
         }
         catch (std::exception &e) {
             std::cerr << "Error occured: " << e.what() << "\n";
         }
+
         if (cmd.cmd == HELLO) {
             try {
                 reply_hello(sock.sock, cmd);
@@ -258,7 +337,7 @@ int main(int argc, char **argv) {
                 throw std::logic_error("this should not be happening");
             }
             std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                      << address << ":" << cmd.addr.sin_port << "(command "
+                      << address << ":" << cmd.addr.sin_port << ". (Command "
                       << cmd.cmd << " is unknown)\n";
         }
     }

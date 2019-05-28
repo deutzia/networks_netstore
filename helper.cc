@@ -6,7 +6,6 @@
 #include <stdexcept>
 
 const int32_t BUFFER_SIZE = 65535;
-const uint32_t CMD_SIZE = 10;
 
 const std::string ReceiveTimeOutException::what_ = "Timeout while reading";
 
@@ -69,22 +68,22 @@ void recv_cmd(cmplx_cmd &cmd, int sock) {
     }
 
     if (rcv_len < CMD_SIZE) {
-        throw std::runtime_error("packet too small");
+        throw std::runtime_error("Packet too small.");
     }
     char temp_buffer[CMD_SIZE + 1];
     memset(temp_buffer, '\0', sizeof(temp_buffer));
     memcpy(temp_buffer, buffer, CMD_SIZE);
-    cmd.cmd = std::string(temp_buffer);
+    cmd.cmd = std::string(temp_buffer, CMD_SIZE + 1);
     int64_t tmp = 0;
     if (uint64_t(rcv_len) < CMD_SIZE + sizeof(cmd.cmd_seq)) {
-        throw std::runtime_error("packet too small");
+        throw std::runtime_error("Packet too small.");
     }
     memcpy(&tmp, buffer + CMD_SIZE, sizeof(tmp));
     cmd.cmd_seq = be64toh(tmp);
     if (is_complex(cmd.cmd)) {
         if (uint64_t(rcv_len) <
             CMD_SIZE + sizeof(cmd.cmd_seq) + sizeof(cmd.param)) {
-            throw std::runtime_error("packet too small");
+            throw std::runtime_error("Packet too small.");
         }
         memcpy(&tmp, buffer + CMD_SIZE + sizeof(tmp), sizeof(tmp));
         cmd.param = be64toh(tmp);
@@ -97,6 +96,7 @@ void recv_cmd(cmplx_cmd &cmd, int sock) {
     }
 }
 
+// TODO(I) napisać to jak człowiek
 int64_t get_cmd_seq() {
     static int num = 0;
     return ++num;
