@@ -17,7 +17,6 @@
 #include "helper.h"
 
 const int64_t MAX_SPACE_DEFAULT = 52428800;
-const int32_t EXIT_INTERRUPT = 130;
 
 std::string mcast_addr, shrd_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
@@ -41,6 +40,8 @@ void remove_connection(int i) {
 void handle_interrupt() {
     std::cerr << "Received SIGINT, exiting\n";
 
+    close(fds[0].fd);
+    close(fds[1].fd);
     for (const auto &conn : connections) {
         close(conn.fd);
         close(conn.sock_fd);
@@ -215,6 +216,9 @@ void reply_get(int sock, const cmplx_cmd &cmd,
     }
 
     int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (new_socket < 0) {
+        throw std::logic_error("Failed to create new socket");
+    }
     struct sockaddr_in local_address;
     local_address.sin_family = AF_INET;
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -229,6 +233,12 @@ void reply_get(int sock, const cmplx_cmd &cmd,
         throw std::logic_error(
             "Failed to switch to listening on a new socket");
     }
+
+    socklen_t len = sizeof(local_address);
+    if (getsockname(new_socket, (sockaddr *)(&local_address), &len) < 0) {
+        close(new_socket);
+        throw std::logic_error("Failed to get port of the new socket");
+    }
     cmplx_cmd reply{CONNECT_ME, cmd.cmd_seq, local_address.sin_port, cmd.data,
                     cmd.addr};
 
@@ -241,7 +251,7 @@ void reply_get(int sock, const cmplx_cmd &cmd,
     std::cout << "Waiting for new connection on port "
               << local_address.sin_port << "\n";
     send_cmd(reply, sock);
-    fds.push_back({new_socket, POLLOUT, 0});
+    fds.push_back({new_socket, POLLIN, 0});
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
                              new_socket, fd, cmd.data, false, true);
 }
@@ -286,18 +296,25 @@ void reply_add(int sock, const cmplx_cmd &cmd,
             "Failed to switch to listening on a new socket");
     }
 
-    int fd = open(std::string(shrd_fldr + "/" + cmd.data).c_str(), O_WRONLY);
+    int fd = open(std::string(shrd_fldr + "/" + cmd.data).c_str(),
+                  O_WRONLY | O_CREAT, 0660);
     if (fd < 0) {
+        int e = errno;
         close(new_socket);
-        throw std::logic_error("Failed to open requested file");
+        throw std::logic_error(
+            std::string("Failed to open requested file for writing ") +
+            strerror(e));
+    }
+    socklen_t len = sizeof(local_address);
+    if (getsockname(new_socket, (sockaddr *)(&local_address), &len) < 0) {
+        close(new_socket);
+        throw std::logic_error("Failed to get port of the new socket");
     }
 
-    cmplx_cmd reply{CAN_ADD, cmd.cmd_seq, local_address.sin_port, "",
+    cmplx_cmd reply{CAN_ADD, cmd.cmd_seq, local_address.sin_port, cmd.data,
                     cmd.addr};
     max_space -= cmd.param;
     files.push_back(cmd.data);
-    std::cout << "Waiting for new connection on port "
-              << local_address.sin_port << "\n";
     send_cmd(reply, sock);
     fds.push_back({new_socket, POLLIN, 0});
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
@@ -310,21 +327,18 @@ void accept_connection(int i) {
         throw std::logic_error("Failed to accept new connection");
     }
 
+    fds[i].events = 0;
     ConnectionInfo info = connections[i - 2];
-    close(info.fd);
 
     if (info.writing) {
-        fds[i] = {new_socket, POLLOUT, 0};
+        fds.push_back({new_socket, POLLOUT, 0});
     }
     else {
-        fds[i] = {new_socket, POLLIN, 0};
+        fds.push_back({new_socket, POLLIN, 0});
     }
-    connections[i - 2] = {boost::posix_time::microsec_clock::local_time(),
-                          new_socket,
-                          info.fd,
-                          info.filename,
-                          true,
-                          info.writing};
+    connections.push_back({boost::posix_time::microsec_clock::local_time(),
+                           new_socket, info.fd, info.filename, true,
+                           info.writing});
 }
 
 void write_to_fd(int i) {
@@ -418,37 +432,19 @@ void init(int argc, char **argv) {
     }
 }
 
-int compute_timeout() {
-    auto now = boost::posix_time::microsec_clock::local_time();
-    auto mini = now;
-    for (const auto &info : connections) {
-        mini = std::min(mini, info.start);
-    }
-    if (mini == now) {
-        return -1;
-    }
-    auto elapsed = now - mini;
-    int elapsed_miliseconds = elapsed.total_microseconds() / 1000;
-    int new_timeout = timeout * 1000 - elapsed_miliseconds;
-    if (new_timeout < 0) {
-        return 0;
-    }
-    return new_timeout;
-}
-
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     init(argc, argv);
 
-    int timeout_milis = compute_timeout();
+    int timeout_milis = compute_timeout(connections, timeout);
     while (true) {
         int ready = poll(fds.data(), fds.size(), timeout_milis);
-        if (ready == 0) {
+        auto now = boost::posix_time::microsec_clock::local_time();
+        if (ready <= 0) {
             // timeout
-            auto now = boost::posix_time::microsec_clock::local_time();
             for (size_t i = fds.size() - 1; i >= 2; --i) {
-                auto duration = connections[i - 2].start - now;
+                auto duration = now - connections[i - 2].start;
                 if (duration.total_microseconds() / 1000000 < timeout) {
                     remove_connection(i);
                 }
@@ -505,18 +501,21 @@ int main(int argc, char **argv) {
         }
         for (size_t i = 2; i < fds.size(); ++i) {
             if (fds[i].revents & POLLIN) {
+                connections[i - 2].start = now;
                 if (!connections[i - 2].was_accepted) {
                     accept_connection(i);
                 }
                 else {
                     fds[i].revents = 0;
-                    write_to_fd(i);
+                    read_from_fd(i);
                 }
             }
             if (fds[i].revents & POLLOUT) {
+                connections[i - 2].start = now;
                 fds[i].revents = 0;
-                read_from_fd(i);
+                write_to_fd(i);
             }
         }
+        timeout_milis = compute_timeout(connections, timeout);
     }
 }

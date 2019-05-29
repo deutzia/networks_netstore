@@ -11,6 +11,7 @@ const int32_t PORT_MAX = 65535;
 const int32_t DATA_MAX = 65489;
 const uint32_t CMD_SIZE = 10;
 const int32_t BUFFER_SIZE = 65535;
+const int32_t EXIT_INTERRUPT = 130;
 
 const std::string HELLO = std::string("HELLO\0\0\0\0\0\0", CMD_SIZE + 1);
 const std::string GOOD_DAY = std::string("GOOD_DAY\0\0\0", CMD_SIZE + 1);
@@ -77,3 +78,7 @@ void send_cmd(const cmplx_cmd &cmd, int sock);
 void recv_cmd(cmplx_cmd &cmd, int sock);
 
 int64_t get_cmd_seq();
+
+// timeout in seconds
+int compute_timeout(const std::vector<ConnectionInfo> &connections,
+                    int timeout);

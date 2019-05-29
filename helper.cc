@@ -24,7 +24,7 @@ ConnectionInfo::ConnectionInfo(const boost::posix_time::ptime &start_,
 }
 
 void send_cmd(const simpl_cmd &cmd, int sock) {
-    size_t size = CMD_SIZE + sizeof(cmd.cmd_seq) + cmd.data.size() + 1;
+    size_t size = CMD_SIZE + sizeof(cmd.cmd_seq) + cmd.data.size();
     char buffer[size];
     memset(buffer, '\0', sizeof(buffer));
     strcpy(buffer, cmd.cmd.c_str());
@@ -61,7 +61,8 @@ void send_cmd(const cmplx_cmd &cmd, int sock) {
 
 // determine whether command cmd is a complex command
 bool is_complex(const std::string &cmd) {
-    return cmd == GOOD_DAY || cmd == CONNECT_ME || cmd == CAN_ADD;
+    return cmd == ADD || cmd == GOOD_DAY || cmd == CONNECT_ME ||
+           cmd == CAN_ADD;
 }
 
 // cmd is the result
@@ -114,4 +115,23 @@ int64_t get_cmd_seq() {
     static std::random_device rd;
     static std::mt19937_64 rng(rd());
     return rng();
+}
+
+int compute_timeout(const std::vector<ConnectionInfo> &connections,
+                    int timeout) {
+    auto now = boost::posix_time::microsec_clock::local_time();
+    auto mini = now;
+    for (const auto &info : connections) {
+        mini = std::min(mini, info.start);
+    }
+    if (mini == now) {
+        return -1;
+    }
+    auto elapsed = now - mini;
+    int elapsed_miliseconds = elapsed.total_microseconds() / 1000;
+    int new_timeout = timeout * 1000 - elapsed_miliseconds;
+    if (new_timeout < 0) {
+        return 0;
+    }
+    return new_timeout;
 }

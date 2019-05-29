@@ -1,6 +1,8 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <boost/program_options.hpp>
+#include <errno.h>
+#include <fcntl.h>
 #include <iostream>
 #include <poll.h>
 #include <signal.h>
@@ -12,8 +14,36 @@
 std::string mcast_addr, out_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
 
+// main udp socket used for most of communications
+int main_socket;
+// 0 is signalfd
+// 1 is main socket (or -1 if we're not listening on it)
+// 2 is stdin
 std::vector<struct pollfd> fds;
 std::vector<ConnectionInfo> connections;
+
+void remove_connection(int i) {
+    close(connections[i - 3].fd);
+    close(connections[i - 3].sock_fd);
+    connections.erase(connections.begin() + i - 3);
+    fds.erase(fds.begin() + i);
+}
+
+void handle_interrupt() {
+    std::cerr << "Received SIGINT, exiting\n";
+
+    close(fds[0].fd);
+    close(main_socket);
+    for (const auto &conn : connections) {
+        close(conn.fd);
+        close(conn.sock_fd);
+    }
+
+    // free the memory
+    fds.clear();
+    connections.clear();
+    exit(EXIT_INTERRUPT);
+}
 
 void parse_args(int argc, char **argv,
                 const boost::program_options::options_description &desc) {
@@ -177,8 +207,166 @@ void remove(int sock, const struct sockaddr_in &remote_address,
     send_cmd(cmd, sock);
 }
 
-// TODO FIX
-int sock;
+// TODO te funkcje muszą zapisywać te swoje cmd_seq i dodawać odpowiednie
+// rzeczy, jak dostaną odpowiedź od serwera na głównym sockecie, to muszą
+// otworzyć te odpowiednie deskryptory i porobić, co trzeba
+void fetch(int sock, const struct sockaddr_in &remote_address,
+           const std::string &filename) {
+    simpl_cmd cmd;
+    cmd.cmd = GET;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.addr = remote_address;
+    cmd.data = filename;
+    send_cmd(cmd, sock);
+}
+
+void upload(int sock, const struct sockaddr_in &remote_address,
+            const std::string &filename) {
+    cmplx_cmd cmd;
+    cmd.cmd = ADD;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.param = 50; // TODO rozmiar pliku
+    std::cerr << "Filename = " << filename << "\n";
+    std::cerr << "seq = " << cmd.cmd_seq << "\n";
+    cmd.data = filename;
+    cmd.addr = remote_address;
+    send_cmd(cmd, sock);
+}
+
+void handle_server_answer() {
+    cmplx_cmd cmd;
+    recv_cmd(cmd, main_socket);
+    if (cmd.cmd == CONNECT_ME) {
+        //    int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        int new_socket = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in local_address;
+        local_address.sin_family = AF_INET;
+        local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+        local_address.sin_port = htons(0);
+        if (bind(new_socket, (struct sockaddr *)&local_address,
+                 sizeof(local_address)) < 0) {
+            close(new_socket);
+            throw std::logic_error("Failed to bind new socket");
+        }
+        struct sockaddr_in remote_address = cmd.addr;
+        remote_address.sin_port = cmd.param;
+        std::cerr << "Connecting new socket to port " << cmd.param << "\n";
+        connect(new_socket, (struct sockaddr *)(&remote_address),
+                sizeof(remote_address));
+        std::string full_name = out_fldr + "/" + cmd.data;
+        int fd = open(full_name.c_str(), O_WRONLY | O_CREAT, 0660);
+        if (fd < 0) {
+            close(new_socket);
+            throw std::logic_error("Failed to open file for writing");
+        }
+
+        char buffer[BUFFER_SIZE];
+        ssize_t len;
+        do {
+            len = read(new_socket, buffer, sizeof(buffer));
+            if (len < 0) {
+                int e = errno;
+                close(new_socket);
+                close(fd);
+                throw std::logic_error(std::string("Failed to read ") +
+                                       strerror(e));
+            }
+            if (len == 0) {
+                close(new_socket);
+                close(fd);
+                return;
+            }
+
+            if (write(fd, buffer, len) != len) {
+                close(new_socket);
+                close(fd);
+                throw std::logic_error("Failed to write");
+            }
+        } while (true);
+    }
+    else if (cmd.cmd == CAN_ADD) {
+        std::cerr << "Received CAN_ADD\n";
+        //    int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        int new_socket = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in local_address;
+        local_address.sin_family = AF_INET;
+        local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+        local_address.sin_port = htons(0);
+        if (bind(new_socket, (struct sockaddr *)&local_address,
+                 sizeof(local_address)) < 0) {
+            close(new_socket);
+            throw std::logic_error("Failed to bind new socket");
+        }
+        struct sockaddr_in remote_address = cmd.addr;
+        remote_address.sin_port = cmd.param;
+        std::cerr << "Connecting new socket to port " << cmd.param << "\n";
+        connect(new_socket, (struct sockaddr *)(&remote_address),
+                sizeof(remote_address));
+        std::string full_name = out_fldr + "/" + cmd.data;
+        std::cerr << "Opening file " << full_name << "\n";
+        int fd = open(full_name.c_str(), O_RDONLY);
+        if (fd < 0) {
+            close(new_socket);
+            throw std::logic_error("Failed to open file for reading");
+        }
+
+        char buffer[BUFFER_SIZE];
+        ssize_t len;
+        do {
+            len = read(fd, buffer, sizeof(buffer));
+            if (len < 0) {
+                int e = errno;
+                close(new_socket);
+                close(fd);
+                throw std::logic_error(std::string("Failed to read!! ") +
+                                       strerror(e));
+            }
+            if (len == 0) {
+                close(new_socket);
+                close(fd);
+                return;
+            }
+
+            if (write(new_socket, buffer, len) != len) {
+                close(new_socket);
+                close(fd);
+                throw std::logic_error("Failed to write");
+            }
+        } while (true);
+    }
+    else {
+        std::cerr << "Received " << cmd.cmd << "\n";
+    }
+}
+
+void test_fetch_file() {
+    std::cerr << "Test fetching file\n";
+    const auto files_list =
+        search(main_socket, get_remote_address(mcast_addr, cmd_port), "");
+    for (const auto &package : files_list) {
+        char address[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
+                      sizeof(address)) == NULL) {
+            throw std::logic_error("this should not be happening");
+        }
+        for (const auto &file : package.second) {
+            std::cout << file << " (" << address << ")\n";
+        }
+    }
+    fetch(main_socket, files_list[0].first, "tescik");
+    handle_server_answer();
+}
+
+void test_upload_file() {
+    std::cerr << "Test uploading file\n";
+    const auto servers =
+        discover(main_socket, get_remote_address(mcast_addr, cmd_port));
+    upload(main_socket, servers[0].first, "tescik");
+    handle_server_answer();
+}
+
+void handle_user_input() {
+}
 
 void init(int argc, char **argv) {
     namespace po = boost::program_options;
@@ -203,12 +391,8 @@ void init(int argc, char **argv) {
         if (sfd < 0) {
             throw std::logic_error("Failed to open signalfd");
         }
-        fds.push_back({sfd, POLLIN, 0});
-
-        fds.push_back({STDIN_FILENO, POLLIN, 0});
-
-        sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock < 0) {
+        main_socket = socket(AF_INET, SOCK_DGRAM, 0);
+        if (main_socket < 0) {
             throw std::logic_error("Failed to create a socket");
         }
         /* connecting to a local address and port */
@@ -216,11 +400,18 @@ void init(int argc, char **argv) {
         local_address.sin_family = AF_INET;
         local_address.sin_addr.s_addr = htonl(INADDR_ANY);
         local_address.sin_port = htons(0);
-        if (bind(sock, (struct sockaddr *)&local_address,
+        if (bind(main_socket, (struct sockaddr *)&local_address,
                  sizeof(local_address)) < 0) {
             throw std::logic_error("Failed to connect to a local address "
                                    "and port");
         }
+
+        fds.push_back({sfd, POLLIN, 0});
+
+        // this will be main_socket when we want to receive answer from servers
+        fds.push_back({-1, POLLIN, 0});
+
+        fds.push_back({STDIN_FILENO, POLLIN, 0});
     }
     catch (po::error &e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
@@ -235,17 +426,45 @@ int main(int argc, char **argv) {
 
     struct sockaddr_in remote_address =
         get_remote_address(mcast_addr, cmd_port);
-    discover(sock, remote_address);
-    const auto files_list = search(sock, remote_address, "");
-    for (const auto &package : files_list) {
-        char address[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
-                      sizeof(address)) == NULL) {
-            throw std::logic_error("this should not be happening");
+
+    test_upload_file();
+
+    /*    int timeout_millis = compute_timeout(connections, timeout);
+        while (true) {
+            int ready = poll(fds.data(), fds.size(), timeout_millis);
+            if (ready <= 0) {
+                // timeout
+                auto now = boost::posix_time::microsec_clock::local_time();
+                for (size_t i = fds.size() - 1; i >= 2; --i) {
+                    auto duration = connections[i - 2].start - now;
+                    if (duration.total_microseconds() / 1000000 < timeout) {
+                        remove_connection(i);
+                    }
+                }
+                continue;
+            }
+            if (fds[0].revents & POLLIN) {
+                handle_interrupt();
+            }
+            if (fds[1].revents & POLLIN) {
+                handle_server_answer();
+            }
+            if (fds[2].revents & POLLIN) {
+                handle_user_input();
+            }
         }
-        for (const auto &file : package.second) {
-            std::cout << file << " (" << address << ")\n";
+        discover(main_socket, remote_address);
+        const auto files_list = search(main_socket, remote_address, "");
+        for (const auto &package : files_list) {
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
+                          sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+            for (const auto &file : package.second) {
+                std::cout << file << " (" << address << ")\n";
+            }
         }
-    }
-    remove(sock, remote_address, "helper.o");
+        remove(main_socket, remote_address, "helper.o");
+        */
 }
