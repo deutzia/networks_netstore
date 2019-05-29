@@ -2,12 +2,18 @@
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <boost/program_options.hpp>
 #include <iostream>
+#include <poll.h>
+#include <signal.h>
 #include <string>
+#include <sys/signalfd.h>
 
 #include "helper.h"
 
 std::string mcast_addr, out_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
+
+std::vector<struct pollfd> fds;
+std::vector<ConnectionInfo> connections;
 
 void parse_args(int argc, char **argv,
                 const boost::program_options::options_description &desc) {
@@ -33,8 +39,8 @@ struct sockaddr_in get_remote_address(const std::string &colon_address,
     if (inet_pton(AF_INET, colon_address.c_str(), &remote_address.sin_addr) <
         0) {
         throw boost::program_options::validation_error(
-            boost::program_options::validation_error::invalid_option_value, "g",
-            colon_address);
+            boost::program_options::validation_error::invalid_option_value,
+            "g", colon_address);
     }
     remote_address.sin_port = htons(port);
     return remote_address;
@@ -65,8 +71,8 @@ discover(int sock, const struct sockaddr_in &remote_address) {
 
         if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (void *)&tval,
                        sizeof(tval)) < 0) {
-            throw std::logic_error("setsockopt " + std::to_string(errno) + " " +
-                                   strerror(errno));
+            throw std::logic_error("setsockopt " + std::to_string(errno) +
+                                   " " + strerror(errno));
         }
         try {
             recv_cmd(reply, sock);
@@ -103,7 +109,8 @@ discover(int sock, const struct sockaddr_in &remote_address) {
 std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
 search(int sock, const struct sockaddr_in &remote_address,
        const std::string &needle) {
-    std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>> result;
+    std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
+        result;
     simpl_cmd cmd;
     cmd.cmd = LIST;
     cmd.cmd_seq = get_cmd_seq();
@@ -126,8 +133,8 @@ search(int sock, const struct sockaddr_in &remote_address,
 
         if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (void *)&tval,
                        sizeof(tval)) < 0) {
-            throw std::logic_error("setsockopt " + std::to_string(errno) + " " +
-                                   strerror(errno));
+            throw std::logic_error("setsockopt " + std::to_string(errno) +
+                                   " " + strerror(errno));
         }
         try {
             recv_cmd(reply, sock);
@@ -162,7 +169,7 @@ search(int sock, const struct sockaddr_in &remote_address,
 
 void remove(int sock, const struct sockaddr_in &remote_address,
             const std::string &filename) {
-    struct simpl_cmd cmd;
+    simpl_cmd cmd;
     cmd.cmd = DEL;
     cmd.cmd_seq = get_cmd_seq();
     cmd.addr = remote_address;
@@ -170,7 +177,10 @@ void remove(int sock, const struct sockaddr_in &remote_address,
     send_cmd(cmd, sock);
 }
 
-int main(int argc, char **argv) {
+// TODO FIX
+int sock;
+
+void init(int argc, char **argv) {
     namespace po = boost::program_options;
     po::options_description desc(argv[0] + std::string(" flags"));
     desc.add_options()(",g", po::value<std::string>(&mcast_addr)->required(),
@@ -182,12 +192,23 @@ int main(int argc, char **argv) {
 
     try {
         parse_args(argc, argv, desc);
-        struct sockaddr_in remote_address =
-            get_remote_address(mcast_addr, cmd_port);
 
-        Socket sock;
-        sock.sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock.sock < 0) {
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGINT);
+        if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) {
+            throw std::logic_error("Failed to block default SIGINT handling");
+        }
+        int sfd = signalfd(-1, &mask, SFD_NONBLOCK);
+        if (sfd < 0) {
+            throw std::logic_error("Failed to open signalfd");
+        }
+        fds.push_back({sfd, POLLIN, 0});
+
+        fds.push_back({STDIN_FILENO, POLLIN, 0});
+
+        sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) {
             throw std::logic_error("Failed to create a socket");
         }
         /* connecting to a local address and port */
@@ -195,28 +216,36 @@ int main(int argc, char **argv) {
         local_address.sin_family = AF_INET;
         local_address.sin_addr.s_addr = htonl(INADDR_ANY);
         local_address.sin_port = htons(0);
-        if (bind(sock.sock, (struct sockaddr *)&local_address,
-                 sizeof local_address) < 0) {
+        if (bind(sock, (struct sockaddr *)&local_address,
+                 sizeof(local_address)) < 0) {
             throw std::logic_error("Failed to connect to a local address "
                                    "and port");
         }
-
-        discover(sock.sock, remote_address);
-        const auto files_list = search(sock.sock, remote_address, "");
-        for (const auto &package : files_list) {
-            char address[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
-                          sizeof(address)) == NULL) {
-                throw std::logic_error("this should not be happening");
-            }
-            for (const auto &file : package.second) {
-                std::cout << file << " (" << address << ")\n";
-            }
-        }
-        remove(sock.sock, remote_address, "helper.o");
     }
     catch (po::error &e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
-        return -1;
+        exit(-1);
     }
+}
+
+int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
+
+    init(argc, argv);
+
+    struct sockaddr_in remote_address =
+        get_remote_address(mcast_addr, cmd_port);
+    discover(sock, remote_address);
+    const auto files_list = search(sock, remote_address, "");
+    for (const auto &package : files_list) {
+        char address[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
+                      sizeof(address)) == NULL) {
+            throw std::logic_error("this should not be happening");
+        }
+        for (const auto &file : package.second) {
+            std::cout << file << " (" << address << ")\n";
+        }
+    }
+    remove(sock, remote_address, "helper.o");
 }

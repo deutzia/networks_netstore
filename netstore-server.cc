@@ -1,13 +1,15 @@
 #include <arpa/inet.h>
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
-#include <csignal>
 #include <errno.h>
-#include <future>
+#include <fcntl.h>
 #include <iostream>
-#include <list>
 #include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdlib.h>
 #include <string>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -15,31 +17,40 @@
 #include "helper.h"
 
 const int64_t MAX_SPACE_DEFAULT = 52428800;
+const int32_t EXIT_INTERRUPT = 130;
 
 std::string mcast_addr, shrd_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
 int64_t max_space = MAX_SPACE_DEFAULT;
 
-// global, shared among all threads, need to be cleaned up at exit
 std::vector<std::string> files;
-Socket sock;
-std::set<int> active_sockets;
-std::list<std::future<bool>> active_futures;
 
-void interrupt_handler(int) {
+// 0 is signalfd
+// 1 is udp socket for most of communications
+// 2+ are sockets for connections with specific clients
+std::vector<struct pollfd> fds;
+std::vector<ConnectionInfo> connections;
+
+void remove_connection(int i) {
+    close(connections[i - 2].fd);
+    close(connections[i - 2].sock_fd);
+    connections.erase(connections.begin() + i - 2);
+    fds.erase(fds.begin() + i);
+}
+
+void handle_interrupt() {
     std::cerr << "Received SIGINT, exiting\n";
 
-    close(sock.sock);
-    sock.sock = 0;
-    for (int sock : active_sockets) {
-        close(sock);
+    for (const auto &conn : connections) {
+        close(conn.fd);
+        close(conn.sock_fd);
     }
 
     // free the memory
     files.clear();
-    active_sockets.clear();
-    active_futures.clear();
-    exit(0);
+    fds.clear();
+    connections.clear();
+    exit(EXIT_INTERRUPT);
 }
 
 void parse_args(int argc, char **argv,
@@ -79,16 +90,17 @@ std::vector<std::string> list_files() {
     }
     // TODO(lab) co się powinno dziać jak mamy za mało quoty?
     if (max_space < 0) {
-        throw std::logic_error("MAX_SPACE is smaller than sum of sizes of files"
-                               " in shared_dir");
+        throw std::logic_error(
+            "MAX_SPACE is smaller than sum of sizes of files"
+            " in shared_dir");
     }
     return result;
 }
 
 int connect_to_mcast(std::string mcast_addr, int32_t port) {
     /* opening a socket */
-    Socket sock(socket(AF_INET, SOCK_DGRAM, 0));
-    if (sock.sock < 0) {
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    if (sock < 0) {
         throw std::logic_error("Failed to create a socket");
     }
 
@@ -99,9 +111,10 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
     local_address.sin_family = AF_INET;
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
     local_address.sin_port = htons(port);
-    if (bind(sock.sock, (struct sockaddr *)&local_address,
-             sizeof(local_address)) < 0) {
-        throw std::logic_error("Failed to connect to a local address and port");
+    if (bind(sock, (struct sockaddr *)&local_address, sizeof(local_address)) <
+        0) {
+        throw std::logic_error(
+            "Failed to connect to a local address and port");
     }
 
     /* connecting to multicast group */
@@ -109,23 +122,23 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
     ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     if (inet_aton(mcast_addr.c_str(), &ip_mreq.imr_multiaddr) == 0) {
         throw boost::program_options::validation_error(
-            boost::program_options::validation_error::invalid_option_value, "g",
-            mcast_addr);
+            boost::program_options::validation_error::invalid_option_value,
+            "g", mcast_addr);
     }
 
-    if (setsockopt(sock.sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void *)&ip_mreq,
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void *)&ip_mreq,
                    sizeof(ip_mreq)) < 0) {
         throw std::logic_error("Failed to connect to multicast group");
     }
 
-    int result = sock.sock;
-    sock.sock = 0;
-
-    return result;
+    return sock;
 }
 
-void reply_hello(int sock, const struct cmplx_cmd &cmd) {
-    struct cmplx_cmd reply;
+void reply_hello(int sock, const cmplx_cmd &cmd) {
+    if (!cmd.data.empty()) {
+        throw std::runtime_error("Data field not empty in HELLO");
+    }
+    cmplx_cmd reply;
     reply.cmd = GOOD_DAY;
     reply.cmd_seq = cmd.cmd_seq;
     reply.param = max_space;
@@ -134,16 +147,16 @@ void reply_hello(int sock, const struct cmplx_cmd &cmd) {
     send_cmd(reply, sock);
 }
 
-void reply_list(int sock, const struct cmplx_cmd &cmd,
+void reply_list(int sock, const cmplx_cmd &cmd,
                 const std::vector<std::string> &files) {
-    struct simpl_cmd reply;
+    simpl_cmd reply;
     reply.cmd = MY_LIST;
     reply.cmd_seq = cmd.cmd_seq;
     reply.addr = cmd.addr;
-    // TODO(lab) jak dobrze ograniczac rozmiar wysylanego pakietu
     for (const auto &file : files) {
         if (file.find(cmd.data) != std::string::npos) {
-            if (reply.data.size() + file.size() + (reply.data.empty() ? 0 : 1) >
+            if (reply.data.size() + file.size() +
+                    (reply.data.empty() ? 0 : 1) >
                 DATA_MAX) {
                 send_cmd(reply, sock);
                 reply.data = "";
@@ -159,7 +172,7 @@ void reply_list(int sock, const struct cmplx_cmd &cmd,
     }
 }
 
-void handle_del(const struct cmplx_cmd &cmd, std::vector<std::string> &files) {
+void handle_del(const cmplx_cmd &cmd, std::vector<std::string> &files) {
     namespace fs = boost::filesystem;
     for (auto it = files.begin(); it != files.end(); ++it) {
         if (*it == cmd.data) {
@@ -178,7 +191,7 @@ void handle_del(const struct cmplx_cmd &cmd, std::vector<std::string> &files) {
     }
 }
 
-void reply_get(int sock, const struct cmplx_cmd &cmd,
+void reply_get(int sock, const cmplx_cmd &cmd,
                std::vector<std::string> files) {
     namespace fs = boost::filesystem;
 
@@ -201,47 +214,159 @@ void reply_get(int sock, const struct cmplx_cmd &cmd,
         return;
     }
 
-    auto f = std::async(std::launch::async, [&cmd, sock]() {
-        struct cmplx_cmd reply;
-        reply.cmd = CONNECT_ME;
-        reply.data = cmd.data;
-        int new_socket = socket(AF_INET, SOCK_DGRAM, 0);
-        active_sockets.insert(new_socket);
+    int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    struct sockaddr_in local_address;
+    local_address.sin_family = AF_INET;
+    local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    local_address.sin_port = htons(0);
+    if (bind(new_socket, (struct sockaddr *)&local_address,
+             sizeof(local_address)) < 0) {
+        close(new_socket);
+        throw std::logic_error("Failed to bind new socket");
+    }
+    if (listen(new_socket, 1) < 0) {
+        close(new_socket);
+        throw std::logic_error(
+            "Failed to switch to listening on a new socket");
+    }
+    cmplx_cmd reply{CONNECT_ME, cmd.cmd_seq, local_address.sin_port, cmd.data,
+                    cmd.addr};
 
-        struct sockaddr_in local_address;
-        local_address.sin_family = AF_INET;
-        local_address.sin_addr.s_addr = htonl(INADDR_ANY);
-        local_address.sin_port = htons(0);
-        if (bind(new_socket, (struct sockaddr *)&local_address,
-                 sizeof(local_address)) < 0) {
-            close(new_socket);
-            active_sockets.erase(new_socket);
-            throw std::logic_error("Faled to bind new socket");
-        }
-        reply.param = local_address.sin_port;
-        std::cout << "Waiting for new connection on port " << local_address.sin_port << "\n";
+    int fd = open(std::string(shrd_fldr + "/" + cmd.data).c_str(), O_RDONLY);
+    if (fd < 0) {
+        // TODO czy tu trzeba wysłać NO_WAY?
+        close(new_socket);
+        throw std::logic_error("Failed to open requested file");
+    }
+    std::cout << "Waiting for new connection on port "
+              << local_address.sin_port << "\n";
+    send_cmd(reply, sock);
+    fds.push_back({new_socket, POLLOUT, 0});
+    connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
+                             new_socket, fd, cmd.data, false, true);
+}
+
+void reply_add(int sock, const cmplx_cmd &cmd,
+               std::vector<std::string> &files) {
+    namespace fs = boost::filesystem;
+
+    if (cmd.param > (uint64_t)(max_space)) {
+        simpl_cmd reply{NO_WAY, cmd.cmd_seq, cmd.data, cmd.addr};
         send_cmd(reply, sock);
+        return;
+    }
 
-        // switch to listening (passive open)
-        if (listen(new_socket, 1) < 0) {
-            close(new_socket);
-            active_sockets.erase(new_socket);
-            throw std::logic_error("Faled to switch to listening on a new socket");
+    for (const auto &file : files) {
+        if (file == cmd.data) {
+            simpl_cmd reply{NO_WAY, cmd.cmd_seq, cmd.data, cmd.addr};
+            send_cmd(reply, sock);
+            return;
         }
+    }
 
-        struct timeval tv;
-        tv.tv_sec = timeout;
-        tv.tv_usec = 0;
-        // TODO(I) zrobić, to co jest w scenariuszu
-        if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (void *)&tv,
-                       sizeof(tv)) < 0) {
-            close(new_socket);
-            active_sockets.erase(new_socket);
-            throw std::logic_error("Failed to set writing timeout");
+    if (cmd.data.size() == 0 || cmd.data.find('/') != std::string::npos) {
+        simpl_cmd reply{NO_WAY, cmd.cmd_seq, cmd.data, cmd.addr};
+        send_cmd(reply, sock);
+        return;
+    }
+
+    int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    struct sockaddr_in local_address;
+    local_address.sin_family = AF_INET;
+    local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    local_address.sin_port = htons(0);
+    if (bind(new_socket, (struct sockaddr *)&local_address,
+             sizeof(local_address)) < 0) {
+        close(new_socket);
+        throw std::logic_error("Failed to bind new socket");
+    }
+    if (listen(new_socket, 1) < 0) {
+        close(new_socket);
+        throw std::logic_error(
+            "Failed to switch to listening on a new socket");
+    }
+
+    int fd = open(std::string(shrd_fldr + "/" + cmd.data).c_str(), O_WRONLY);
+    if (fd < 0) {
+        close(new_socket);
+        throw std::logic_error("Failed to open requested file");
+    }
+
+    cmplx_cmd reply{CAN_ADD, cmd.cmd_seq, local_address.sin_port, "",
+                    cmd.addr};
+    max_space -= cmd.param;
+    files.push_back(cmd.data);
+    std::cout << "Waiting for new connection on port "
+              << local_address.sin_port << "\n";
+    send_cmd(reply, sock);
+    fds.push_back({new_socket, POLLIN, 0});
+    connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
+                             new_socket, fd, cmd.data, false, false);
+}
+
+void accept_connection(int i) {
+    int new_socket = accept4(fds[i].fd, NULL, NULL, SOCK_NONBLOCK);
+    if (new_socket < 0) {
+        throw std::logic_error("Failed to accept new connection");
+    }
+
+    ConnectionInfo info = connections[i - 2];
+    close(info.fd);
+
+    if (info.writing) {
+        fds[i] = {new_socket, POLLOUT, 0};
+    }
+    else {
+        fds[i] = {new_socket, POLLIN, 0};
+    }
+    connections[i - 2] = {boost::posix_time::microsec_clock::local_time(),
+                          new_socket,
+                          info.fd,
+                          info.filename,
+                          true,
+                          info.writing};
+}
+
+void write_to_fd(int i) {
+    ConnectionInfo &info = connections[i - 2];
+    int len;
+    if (info.position == info.buf_size) {
+        info.buf_size = read(info.fd, info.buffer, sizeof(info.buffer));
+        if (info.buf_size < 0) {
+            remove_connection(i);
+            throw std::runtime_error("Failed to read requested file");
         }
-        return true;
-    });
-    active_futures.push_back(std::move(f));
+        if (info.buf_size == 0) {
+            remove_connection(i);
+            return;
+        }
+    }
+    len = write(info.sock_fd, info.buffer + info.position,
+                info.buf_size - info.position);
+    if (len < 0) {
+        remove_connection(i);
+        throw std::runtime_error("Failed to send requested file");
+    }
+    info.position += len;
+}
+
+void read_from_fd(int i) {
+    ConnectionInfo &info = connections[i - 2];
+    int len;
+    len = read(info.sock_fd, info.buffer, sizeof(info.buffer));
+    if (len < 0) {
+        remove_connection(i);
+        throw std::runtime_error("Failed to receive requested file");
+    }
+    if (len == 0) {
+        remove_connection(i);
+        return;
+    }
+    len = write(info.fd, info.buffer, len);
+    if (len < 0) {
+        remove_connection(i);
+        throw std::runtime_error("Failed to write fileon the disk");
+    }
 }
 
 void init(int argc, char **argv) {
@@ -264,7 +389,20 @@ void init(int argc, char **argv) {
         for (const auto &file : files) {
             std::cout << file << "\n";
         }
-        sock.sock = connect_to_mcast(mcast_addr, cmd_port);
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGINT);
+        if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) {
+            throw std::logic_error("Failed to block default SIGINT handling");
+        }
+        int sfd = signalfd(-1, &mask, SFD_NONBLOCK);
+        if (sfd < 0) {
+            throw std::logic_error("Failed to open signalfd");
+        }
+        fds.push_back({sfd, POLLIN, 0});
+
+        int sock = connect_to_mcast(mcast_addr, cmd_port);
+        fds.push_back({sock, POLLIN, 0});
     }
     catch (po::error &e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
@@ -280,65 +418,105 @@ void init(int argc, char **argv) {
     }
 }
 
+int compute_timeout() {
+    auto now = boost::posix_time::microsec_clock::local_time();
+    auto mini = now;
+    for (const auto &info : connections) {
+        mini = std::min(mini, info.start);
+    }
+    if (mini == now) {
+        return -1;
+    }
+    auto elapsed = now - mini;
+    int elapsed_miliseconds = elapsed.total_microseconds() / 1000;
+    int new_timeout = timeout * 1000 - elapsed_miliseconds;
+    if (new_timeout < 0) {
+        return 0;
+    }
+    return new_timeout;
+}
+
 int main(int argc, char **argv) {
-    // TODO potencjalnie chcę to robić pollem i nie mieć wątków
-    signal(SIGINT, interrupt_handler);
     signal(SIGPIPE, SIG_IGN);
 
     init(argc, argv);
 
+    int timeout_milis = compute_timeout();
     while (true) {
-        struct cmplx_cmd cmd;
-        try {
-            recv_cmd(cmd, sock.sock);
-        }
-        catch (std::runtime_error &e) {
-            char address[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
-                          sizeof(address)) == NULL) {
-                throw std::logic_error("this should not be happening");
+        int ready = poll(fds.data(), fds.size(), timeout_milis);
+        if (ready == 0) {
+            // timeout
+            auto now = boost::posix_time::microsec_clock::local_time();
+            for (size_t i = fds.size() - 1; i >= 2; --i) {
+                auto duration = connections[i - 2].start - now;
+                if (duration.total_microseconds() / 1000000 < timeout) {
+                    remove_connection(i);
+                }
             }
-            std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                      << address << ":" << cmd.addr.sin_port << ". ("
-                      << e.what() << ")\n";
+            continue;
         }
-        catch (std::exception &e) {
-            std::cerr << "Error occured: " << e.what() << "\n";
+        if (fds[0].revents & POLLIN) {
+            handle_interrupt();
         }
-
-        if (cmd.cmd == HELLO) {
+        if (fds[1].revents & POLLIN) {
+            fds[1].revents = 0;
+            cmplx_cmd cmd;
             try {
-                reply_hello(sock.sock, cmd);
+                recv_cmd(cmd, fds[1].fd);
+                if (cmd.cmd == HELLO) {
+                    reply_hello(fds[1].fd, cmd);
+                }
+                else if (cmd.cmd == LIST) {
+                    reply_list(fds[1].fd, cmd, files);
+                }
+                else if (cmd.cmd == GET) {
+                    reply_get(fds[1].fd, cmd, files);
+                }
+                else if (cmd.cmd == DEL) {
+                    handle_del(cmd, files);
+                }
+                else if (cmd.cmd == ADD) {
+                    reply_add(fds[1].fd, cmd, files);
+                }
+                else {
+                    char address[INET_ADDRSTRLEN];
+                    if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr),
+                                  address, sizeof(address)) == NULL) {
+                        throw std::logic_error("this should not be happening");
+                    }
+                    std::cerr << "[PCKG ERROR] Skipping invalid package from "
+                              << address << ":" << cmd.addr.sin_port
+                              << ". (Command " << cmd.cmd << " is unknown)\n";
+                }
+            }
+            catch (std::runtime_error &e) {
+                char address[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
+                              sizeof(address)) == NULL) {
+                    throw std::logic_error("this should not be happening");
+                }
+                std::cerr << "[PCKG ERROR] Skipping invalid package from "
+                          << address << ":" << cmd.addr.sin_port << ". ("
+                          << e.what() << ")\n";
             }
             catch (std::exception &e) {
                 std::cerr << "Error occured: " << e.what() << "\n";
             }
         }
-        else if (cmd.cmd == LIST) {
-            try {
-                reply_list(sock.sock, cmd, files);
+        for (size_t i = 2; i < fds.size(); ++i) {
+            if (fds[i].revents & POLLIN) {
+                if (!connections[i - 2].was_accepted) {
+                    accept_connection(i);
+                }
+                else {
+                    fds[i].revents = 0;
+                    write_to_fd(i);
+                }
             }
-            catch (std::exception &e) {
-                std::cerr << "Error occured: " << e.what() << "\n";
+            if (fds[i].revents & POLLOUT) {
+                fds[i].revents = 0;
+                read_from_fd(i);
             }
-        }
-        else if (cmd.cmd == DEL) {
-            try {
-                handle_del(cmd, files);
-            }
-            catch (std::exception &e) {
-                std::cerr << "Error occured: " << e.what() << "\n";
-            }
-        }
-        else {
-            char address[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
-                          sizeof(address)) == NULL) {
-                throw std::logic_error("this should not be happening");
-            }
-            std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                      << address << ":" << cmd.addr.sin_port << ". (Command "
-                      << cmd.cmd << " is unknown)\n";
         }
     }
 }

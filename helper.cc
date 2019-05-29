@@ -1,13 +1,27 @@
 #include "helper.h"
 
-#include <cstring>
 #include <endian.h>
 #include <errno.h>
+#include <random>
 #include <stdexcept>
-
-const int32_t BUFFER_SIZE = 65535;
+#include <string.h>
 
 const std::string ReceiveTimeOutException::what_ = "Timeout while reading";
+
+ConnectionInfo::ConnectionInfo(const boost::posix_time::ptime &start_,
+                               int sock_fd_, int fd_,
+                               const std::string &filename_,
+                               bool was_accepted_, bool writing_) {
+    start = start_;
+    sock_fd = sock_fd_;
+    fd = fd_;
+    filename = filename_;
+    was_accepted = was_accepted_;
+    writing = writing_;
+    memset(buffer, '\0', BUFFER_SIZE);
+    position = 0;
+    buf_size = 0;
+}
 
 void send_cmd(const simpl_cmd &cmd, int sock) {
     size_t size = CMD_SIZE + sizeof(cmd.cmd_seq) + cmd.data.size() + 1;
@@ -96,8 +110,8 @@ void recv_cmd(cmplx_cmd &cmd, int sock) {
     }
 }
 
-// TODO(I) napisać to jak człowiek
 int64_t get_cmd_seq() {
-    static int num = 0;
-    return ++num;
+    static std::random_device rd;
+    static std::mt19937_64 rng(rd());
+    return rng();
 }

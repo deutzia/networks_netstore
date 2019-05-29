@@ -1,13 +1,16 @@
-#include <iostream>
-
 #include <arpa/inet.h>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
+#include <iostream>
+#include <string.h>
 #include <string>
 #include <unistd.h>
+
 const int32_t TIMEOUT_DEFAULT = 5;
 const int32_t TIMEOUT_MAX = 300;
 const int32_t PORT_MAX = 65535;
-const int32_t DATA_MAX = 558;
+const int32_t DATA_MAX = 65489;
 const uint32_t CMD_SIZE = 10;
+const int32_t BUFFER_SIZE = 65535;
 
 const std::string HELLO = std::string("HELLO\0\0\0\0\0\0", CMD_SIZE + 1);
 const std::string GOOD_DAY = std::string("GOOD_DAY\0\0\0", CMD_SIZE + 1);
@@ -20,27 +23,28 @@ const std::string ADD = std::string("ADD\0\0\0\0\0\0\0\0", CMD_SIZE + 1);
 const std::string NO_WAY = std::string("NO_WAY\0\0\0\0\0", CMD_SIZE + 1);
 const std::string CAN_ADD = std::string("CAN_ADD\0\0\0\0", CMD_SIZE + 1);
 
-class Socket {
-  public:
-    int sock;
-    Socket() : sock(0) {
-    }
-    Socket(int sock) : sock(sock) {
-    }
-
-    ~Socket() {
-        if (sock > 0) {
-            close(sock);
-        }
-    }
-};
-
 class ReceiveTimeOutException : public std::exception {
   private:
     static const std::string what_;
     virtual const char *what() const noexcept {
         return what_.c_str();
     }
+};
+
+class ConnectionInfo {
+  public:
+    boost::posix_time::ptime start;
+    int sock_fd;
+    int fd;
+    std::string filename;
+    bool was_accepted;
+    bool writing;
+    char buffer[BUFFER_SIZE];
+    int position;
+    int buf_size;
+    ConnectionInfo(const boost::posix_time::ptime &start_, int sock_fd_,
+                   int fd_, const std::string &filename_, bool was_accepted_,
+                   bool writing_);
 };
 
 class simpl_cmd {
@@ -53,7 +57,8 @@ class simpl_cmd {
     struct sockaddr_in addr;
 };
 
-struct cmplx_cmd {
+class cmplx_cmd {
+  public:
     std::string cmd;
     uint64_t cmd_seq;
     uint64_t param;
