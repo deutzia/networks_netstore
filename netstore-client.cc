@@ -11,6 +11,13 @@
 
 #include "helper.h"
 
+const std::string DISCOVER = "discover";
+const std::string SEARCH = "search";
+const std::string FETCH = "fetch";
+const std::string UPLOAD = "upload";
+const std::string REMOVE = "remove";
+const std::string EXIT = "exit";
+
 std::string mcast_addr, out_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
 
@@ -21,6 +28,21 @@ int main_socket;
 // 2 is stdin
 std::vector<struct pollfd> fds;
 std::vector<ConnectionInfo> connections;
+std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>> files;
+
+void free_memory() {
+    close(fds[0].fd);
+    close(main_socket);
+    for (const auto &conn : connections) {
+        close(conn.fd);
+        close(conn.sock_fd);
+    }
+
+    // free the memory
+    fds.clear();
+    connections.clear();
+    files.clear();
+}
 
 void remove_connection(int i) {
     close(connections[i - 3].fd);
@@ -32,16 +54,8 @@ void remove_connection(int i) {
 void handle_interrupt() {
     std::cerr << "Received SIGINT, exiting\n";
 
-    close(fds[0].fd);
-    close(main_socket);
-    for (const auto &conn : connections) {
-        close(conn.fd);
-        close(conn.sock_fd);
-    }
+    free_memory();
 
-    // free the memory
-    fds.clear();
-    connections.clear();
     exit(EXIT_INTERRUPT);
 }
 
@@ -76,10 +90,11 @@ struct sockaddr_in get_remote_address(const std::string &colon_address,
     return remote_address;
 }
 
-// returns servers, where first is sockaddr, and second is their free space
-std::vector<std::pair<struct sockaddr_in, int64_t>>
+// returns servers, where first is sockaddr, and second is mcast_addr and third
+// is their free space
+std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>>
 discover(int sock, const struct sockaddr_in &remote_address) {
-    std::vector<std::pair<struct sockaddr_in, int64_t>> result;
+    std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>> result;
     simpl_cmd cmd;
     cmd.cmd = HELLO;
     cmd.cmd_seq = get_cmd_seq();
@@ -124,9 +139,7 @@ discover(int sock, const struct sockaddr_in &remote_address) {
                           << "(command is not GOOD_DAY when it should)\n";
                 continue;
             }
-            result.emplace_back(reply.addr, reply.param);
-            std::cout << "Found " << address << " (" << reply.data
-                      << ") with free space " << reply.param << "\n";
+            result.emplace_back(reply.addr, reply.data, reply.param);
         }
         catch (ReceiveTimeOutException &e) {
             break;
@@ -318,7 +331,7 @@ void handle_server_answer() {
                 int e = errno;
                 close(new_socket);
                 close(fd);
-                throw std::logic_error(std::string("Failed to read!! ") +
+                throw std::logic_error(std::string("Failed to read ") +
                                        strerror(e));
             }
             if (len == 0) {
@@ -361,11 +374,60 @@ void test_upload_file() {
     std::cerr << "Test uploading file\n";
     const auto servers =
         discover(main_socket, get_remote_address(mcast_addr, cmd_port));
-    upload(main_socket, servers[0].first, "tescik");
+    upload(main_socket, std::get<0>(servers[0]), "tescik");
     handle_server_answer();
 }
 
-void handle_user_input() {
+void handle_user_input(const struct sockaddr_in &remote_address) {
+    std::string line;
+    std::getline(std::cin, line);
+
+    // Assume discover cannot have whitespace after it
+    if (boost::iequals(line, DISCOVER)) {
+        auto servers = discover(main_socket, remote_address);
+
+        char address[INET_ADDRSTRLEN];
+        for (const auto &server_info : servers) {
+            if (inet_ntop(AF_INET,
+                          (void *)(&std::get<0>(server_info).sin_addr),
+                          address, sizeof(address)) == NULL) {
+                throw std::logic_error("inet_ntop failed unexpectedly");
+            }
+
+            std::cout << "Found " << address << " ("
+                      << std::get<1>(server_info) << ") with free space "
+                      << std::get<2>(server_info) << "\n";
+        }
+    }
+    else if (boost::iequals(line.substr(0, SEARCH.size()), SEARCH)) {
+        std::string needle;
+        if (line.size() > SEARCH.size()) {
+            if (line[SEARCH.size()] != ' ') {
+                return;
+            }
+            needle = line.substr(SEARCH.size() + 1, line.size());
+        }
+        files = search(main_socket, remote_address, needle);
+        for (const auto &package : files) {
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
+                          sizeof(address)) == NULL) {
+                throw std::logic_error("inet_ntop dailed unexpectedly");
+            }
+            for (const auto &file : package.second) {
+                std::cout << file << " (" << address << ")\n";
+            }
+        }
+    }
+    else if (boost::iequals(line.substr(0, REMOVE.size()), REMOVE) &&
+             line.size() > REMOVE.size() + 2 && line[REMOVE.size()] == ' ') {
+        std::string needle = line.substr(REMOVE.size() + 1, line.size());
+        remove(main_socket, remote_address, needle);
+    }
+    else if (boost::iequals(line, EXIT)) {
+        free_memory();
+        exit(0);
+    }
 }
 
 void init(int argc, char **argv) {
@@ -427,44 +489,42 @@ int main(int argc, char **argv) {
     struct sockaddr_in remote_address =
         get_remote_address(mcast_addr, cmd_port);
 
-    test_upload_file();
+    //    test_upload_file();
 
-    /*    int timeout_millis = compute_timeout(connections, timeout);
-        while (true) {
-            int ready = poll(fds.data(), fds.size(), timeout_millis);
-            if (ready <= 0) {
-                // timeout
-                auto now = boost::posix_time::microsec_clock::local_time();
-                for (size_t i = fds.size() - 1; i >= 2; --i) {
-                    auto duration = connections[i - 2].start - now;
-                    if (duration.total_microseconds() / 1000000 < timeout) {
-                        remove_connection(i);
-                    }
+    int timeout_millis = compute_timeout(connections, timeout);
+    while (true) {
+        int ready = poll(fds.data(), fds.size(), timeout_millis);
+        if (ready <= 0) {
+            // timeout
+            auto now = boost::posix_time::microsec_clock::local_time();
+            for (size_t i = fds.size() - 1; i >= 2; --i) {
+                auto duration = connections[i - 2].start - now;
+                if (duration.total_microseconds() / 1000000 < timeout) {
+                    remove_connection(i);
                 }
-                continue;
             }
-            if (fds[0].revents & POLLIN) {
-                handle_interrupt();
-            }
-            if (fds[1].revents & POLLIN) {
-                handle_server_answer();
-            }
-            if (fds[2].revents & POLLIN) {
-                handle_user_input();
-            }
+            continue;
         }
-        discover(main_socket, remote_address);
-        const auto files_list = search(main_socket, remote_address, "");
-        for (const auto &package : files_list) {
-            char address[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
-                          sizeof(address)) == NULL) {
-                throw std::logic_error("this should not be happening");
-            }
-            for (const auto &file : package.second) {
-                std::cout << file << " (" << address << ")\n";
-            }
+        if (fds[0].revents & POLLIN) {
+            handle_interrupt();
         }
-        remove(main_socket, remote_address, "helper.o");
-        */
+        if (fds[1].revents & POLLIN) {
+            handle_server_answer();
+        }
+        if (fds[2].revents & POLLIN) {
+            handle_user_input(remote_address);
+        }
+    }
+    const auto files_list = search(main_socket, remote_address, "");
+    for (const auto &package : files_list) {
+        char address[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,
+                      sizeof(address)) == NULL) {
+            throw std::logic_error("this should not be happening");
+        }
+        for (const auto &file : package.second) {
+            std::cout << file << " (" << address << ")\n";
+        }
+    }
+    remove(main_socket, remote_address, "helper.o");
 }
