@@ -500,20 +500,25 @@ int main(int argc, char **argv) {
             }
         }
         for (size_t i = 2; i < fds.size(); ++i) {
-            if (fds[i].revents & POLLIN) {
-                connections[i - 2].start = now;
-                if (!connections[i - 2].was_accepted) {
-                    accept_connection(i);
+            try {
+                if (fds[i].revents & POLLIN) {
+                    connections[i - 2].start = now;
+                    if (!connections[i - 2].was_accepted) {
+                        accept_connection(i);
+                    }
+                    else {
+                        fds[i].revents = 0;
+                        read_from_fd(i);
+                    }
                 }
-                else {
+                if (fds[i].revents & POLLOUT) {
+                    connections[i - 2].start = now;
                     fds[i].revents = 0;
-                    read_from_fd(i);
+                    write_to_fd(i);
                 }
             }
-            if (fds[i].revents & POLLOUT) {
-                connections[i - 2].start = now;
-                fds[i].revents = 0;
-                write_to_fd(i);
+            catch (std::exception &e) {
+                std::cerr << "Error occured: " << e.what() << "\n";
             }
         }
         timeout_milis = compute_timeout(connections, timeout);
