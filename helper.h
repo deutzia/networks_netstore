@@ -46,6 +46,7 @@ class ConnectionInfo {
     ConnectionInfo(const boost::posix_time::ptime &start_, int sock_fd_,
                    int fd_, const std::string &filename_, bool was_accepted_,
                    bool writing_);
+    ConnectionInfo();
 };
 
 class simpl_cmd {

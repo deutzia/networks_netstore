@@ -23,6 +23,16 @@ ConnectionInfo::ConnectionInfo(const boost::posix_time::ptime &start_,
     buf_size = 0;
 }
 
+ConnectionInfo::ConnectionInfo() {
+    sock_fd = 0;
+    fd = 0;
+    was_accepted = false;
+    writing = false;
+    memset(buffer, '\0', BUFFER_SIZE);
+    position = 0;
+    buf_size = 0;
+}
+
 void send_cmd(const simpl_cmd &cmd, int sock) {
     size_t size = CMD_SIZE + sizeof(cmd.cmd_seq) + cmd.data.size();
     char buffer[size];

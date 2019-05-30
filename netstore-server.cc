@@ -239,8 +239,8 @@ void reply_get(int sock, const cmplx_cmd &cmd,
         close(new_socket);
         throw std::logic_error("Failed to get port of the new socket");
     }
-    cmplx_cmd reply{CONNECT_ME, cmd.cmd_seq, local_address.sin_port, cmd.data,
-                    cmd.addr};
+    cmplx_cmd reply{CONNECT_ME, cmd.cmd_seq, ntohs(local_address.sin_port),
+                    cmd.data, cmd.addr};
 
     int fd = open(std::string(shrd_fldr + "/" + cmd.data).c_str(), O_RDONLY);
     if (fd < 0) {
@@ -249,7 +249,7 @@ void reply_get(int sock, const cmplx_cmd &cmd,
         throw std::logic_error("Failed to open requested file");
     }
     std::cout << "Waiting for new connection on port "
-              << local_address.sin_port << "\n";
+              << ntohs(local_address.sin_port) << "\n";
     send_cmd(reply, sock);
     fds.push_back({new_socket, POLLIN, 0});
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
@@ -437,15 +437,16 @@ int main(int argc, char **argv) {
 
     init(argc, argv);
 
-    int timeout_milis = compute_timeout(connections, timeout);
+    int timeout_millis = compute_timeout(connections, timeout);
     while (true) {
-        int ready = poll(fds.data(), fds.size(), timeout_milis);
+        int ready = poll(fds.data(), fds.size(), timeout_millis);
         auto now = boost::posix_time::microsec_clock::local_time();
         if (ready <= 0) {
             // timeout
             for (size_t i = fds.size() - 1; i >= 2; --i) {
                 auto duration = now - connections[i - 2].start;
-                if (duration.total_microseconds() / 1000000 < timeout) {
+                if (duration.total_microseconds() / 1000000 > timeout) {
+                    std::cerr << "Removing connection " << i << "\n";
                     remove_connection(i);
                 }
             }
@@ -481,7 +482,7 @@ int main(int argc, char **argv) {
                         throw std::logic_error("this should not be happening");
                     }
                     std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                              << address << ":" << cmd.addr.sin_port
+                              << address << ":" << ntohs(cmd.addr.sin_port)
                               << ". (Command " << cmd.cmd << " is unknown)\n";
                 }
             }
@@ -492,8 +493,8 @@ int main(int argc, char **argv) {
                     throw std::logic_error("this should not be happening");
                 }
                 std::cerr << "[PCKG ERROR] Skipping invalid package from "
-                          << address << ":" << cmd.addr.sin_port << ". ("
-                          << e.what() << ")\n";
+                          << address << ":" << ntohs(cmd.addr.sin_port)
+                          << ". (" << e.what() << ")\n";
             }
             catch (std::exception &e) {
                 std::cerr << "Error occured: " << e.what() << "\n";
@@ -521,6 +522,6 @@ int main(int argc, char **argv) {
                 std::cerr << "Error occured: " << e.what() << "\n";
             }
         }
-        timeout_milis = compute_timeout(connections, timeout);
+        timeout_millis = compute_timeout(connections, timeout);
     }
 }
