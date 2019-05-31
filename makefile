@@ -1,5 +1,5 @@
 COMPILER = g++
-CCFLAGS = -Wall -Wextra -std=c++17 -O2
+CCFLAGS = -Wall -Wextra -std=c++17 -O0 -g
 LFLAGS = -lboost_program_options -lboost_filesystem -lboost_system
 
 SRCS = netstore-client.cc netstore-server.cc helper.cc

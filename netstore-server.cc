@@ -203,12 +203,12 @@ void reply_get(int sock, const cmplx_cmd &cmd,
             break;
         }
     }
+    char address[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
+                  sizeof(address)) == NULL) {
+        throw std::logic_error("inet_ntop failed unexpectedly");
+    }
     if (!have_file) {
-        char address[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
-                      sizeof(address)) == NULL) {
-            throw std::logic_error("this should not be happening");
-        }
         std::cerr << "[PCKG ERROR] Skipping invalid package from " << address
                   << ":" << cmd.addr.sin_port
                   << ". (Requested file does not exist)\n";
@@ -253,7 +253,7 @@ void reply_get(int sock, const cmplx_cmd &cmd,
     send_cmd(reply, sock);
     fds.push_back({new_socket, POLLIN, 0});
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
-                             new_socket, fd, cmd.data, false, true);
+                             new_socket, fd, cmd.data, false, true, "", 0);
 }
 
 void reply_add(int sock, const cmplx_cmd &cmd,
@@ -310,6 +310,11 @@ void reply_add(int sock, const cmplx_cmd &cmd,
         close(new_socket);
         throw std::logic_error("Failed to get port of the new socket");
     }
+    char address[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, (void *)(&local_address.sin_addr), address,
+                  sizeof(address)) == NULL) {
+        throw std::logic_error("inet_ntop failed unexpectedly");
+    }
 
     cmplx_cmd reply{CAN_ADD, cmd.cmd_seq, ntohs(local_address.sin_port), "",
                     cmd.addr};
@@ -318,7 +323,8 @@ void reply_add(int sock, const cmplx_cmd &cmd,
     send_cmd(reply, sock);
     fds.push_back({new_socket, POLLIN, 0});
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
-                             new_socket, fd, cmd.data, false, false);
+                             new_socket, fd, cmd.data, false, false, address,
+                             ntohs(local_address.sin_port));
 }
 
 void accept_connection(int i) {
@@ -338,7 +344,7 @@ void accept_connection(int i) {
     }
     connections.push_back({boost::posix_time::microsec_clock::local_time(),
                            new_socket, info.fd, info.filename, true,
-                           info.writing});
+                           info.writing, info.ip, info.port});
 }
 
 void write_to_fd(int i) {
@@ -360,7 +366,8 @@ void write_to_fd(int i) {
                 info.buf_size - info.position);
     if (len < 0) {
         remove_connection(i);
-        throw std::runtime_error(std::string("Failed to send requested file ") + strerror(errno));
+        throw std::runtime_error(
+            std::string("Failed to send requested file ") + strerror(errno));
     }
     info.position += len;
 }
@@ -438,7 +445,7 @@ int main(int argc, char **argv) {
 
     init(argc, argv);
 
-    int timeout_millis = compute_timeout(connections, timeout);
+    int timeout_millis = compute_timeout(connections, {}, timeout);
     while (true) {
         int ready = poll(fds.data(), fds.size(), timeout_millis);
         auto now = boost::posix_time::microsec_clock::local_time();
@@ -523,6 +530,6 @@ int main(int argc, char **argv) {
                 std::cerr << "Error occured: " << e.what() << "\n";
             }
         }
-        timeout_millis = compute_timeout(connections, timeout);
+        timeout_millis = compute_timeout(connections, {}, timeout);
     }
 }

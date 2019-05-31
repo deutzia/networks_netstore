@@ -11,7 +11,8 @@ const std::string ReceiveTimeOutException::what_ = "Timeout while reading";
 ConnectionInfo::ConnectionInfo(const boost::posix_time::ptime &start_,
                                int sock_fd_, int fd_,
                                const std::string &filename_,
-                               bool was_accepted_, bool writing_) {
+                               bool was_accepted_, bool writing_,
+                               const std::string &ip_, uint16_t port_) {
     start = start_;
     sock_fd = sock_fd_;
     fd = fd_;
@@ -21,6 +22,8 @@ ConnectionInfo::ConnectionInfo(const boost::posix_time::ptime &start_,
     memset(buffer, '\0', BUFFER_SIZE);
     position = 0;
     buf_size = 0;
+    ip = ip_;
+    port = port_;
 }
 
 ConnectionInfo::ConnectionInfo() {
@@ -31,6 +34,7 @@ ConnectionInfo::ConnectionInfo() {
     memset(buffer, '\0', BUFFER_SIZE);
     position = 0;
     buf_size = 0;
+    port = 0;
 }
 
 void send_cmd(const simpl_cmd &cmd, int sock) {
@@ -128,11 +132,15 @@ uint64_t get_cmd_seq() {
 }
 
 int compute_timeout(const std::vector<ConnectionInfo> &connections,
+                    const std::map<uint64_t, boost::posix_time::ptime> &starts,
                     int timeout) {
     auto now = boost::posix_time::microsec_clock::local_time();
     auto mini = now;
     for (const auto &info : connections) {
         mini = std::min(mini, info.start);
+    }
+    for (const auto &start : starts) {
+        mini = std::min(mini, start.second);
     }
     if (mini == now) {
         return -1;

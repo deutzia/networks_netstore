@@ -43,9 +43,11 @@ class ConnectionInfo {
     char buffer[BUFFER_SIZE];
     int position;
     int buf_size;
+    std::string ip;
+    uint16_t port;
     ConnectionInfo(const boost::posix_time::ptime &start_, int sock_fd_,
                    int fd_, const std::string &filename_, bool was_accepted_,
-                   bool writing_);
+                   bool writing_, const std::string &ip_, uint16_t port);
     ConnectionInfo();
 };
 
@@ -82,4 +84,5 @@ uint64_t get_cmd_seq();
 
 // timeout in seconds
 int compute_timeout(const std::vector<ConnectionInfo> &connections,
+                    const std::map<uint64_t, boost::posix_time::ptime> &starts,
                     int timeout);

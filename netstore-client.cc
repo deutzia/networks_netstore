@@ -40,6 +40,11 @@ std::map<uint64_t,
 
 std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>> servers;
 
+// only ADD commands go here, so when they time out, because timeout after
+// sending ADD toone server is equivalent to receiving NO_WAY from that server
+// and should be handled accordingly
+std::map<uint64_t, boost::posix_time::ptime> seq_to_starttime;
+
 void free_memory() {
     close(fds[0].fd);
     close(main_socket);
@@ -137,15 +142,20 @@ discover(int sock, const struct sockaddr_in &remote_address) {
                 throw std::logic_error("this should not be happening");
             }
 
-            //            std::cerr << "Received reply from " << address << ":"
-            //                      << ntohs(reply.addr.sin_port)
-            //                      << " with cmd = " << reply.cmd
-            //                      << " and seq = " << reply.cmd_seq
-            //                      << " (original seq was " << cmd.cmd_seq <<
-            //                      "). Data is \""
-            //                      << reply.data << "\"(" << reply.data.size()
-            //                      << ") and param is " << reply.param <<
-            //                      "\n";
+            //                        std::cerr << "Received reply from " <<
+            //                        address << ":"
+            //                                  << ntohs(reply.addr.sin_port)
+            //                                  << " with cmd = " << reply.cmd
+            //                                  << " and seq = " <<
+            //                                  reply.cmd_seq
+            //                                  << " (original seq was " <<
+            //                                  cmd.cmd_seq <<
+            //                                  "). Data is \""
+            //                                  << reply.data << "\"(" <<
+            //                                  reply.data.size()
+            //                                  << ") and param is " <<
+            //                                  reply.param <<
+            //                                  "\n";
 
             if (reply.cmd_seq != cmd.cmd_seq) {
                 std::cerr << "[PCKG ERROR]  Skipping invalid package from "
@@ -256,27 +266,34 @@ void fetch(int sock, const struct sockaddr_in &remote_address,
             std::string("Failed to open requested file for writing ") +
             strerror(e));
     }
-    ConnectionInfo info =
+    seq_to_conn[cmd.cmd_seq] =
         ConnectionInfo(boost::posix_time::microsec_clock::local_time(),
-                       main_socket, fd, filename, false, true);
-    seq_to_conn[cmd.cmd_seq] = info;
+                       main_socket, fd, filename, false, true, "", 0);
     send_cmd(cmd, sock);
-    fds[1].events = POLLIN;
 }
 
-void handle_no_way(uint64_t seq) {
+auto handle_no_way(uint64_t seq) {
+    auto servers = seq_to_servers.find(seq)->second;
+    cmplx_cmd cmd = servers.second;
     auto conn_it = seq_to_conn.find(seq);
-    auto serv_it = seq_to_servers.find(seq);
-    cmplx_cmd &cmd = serv_it->second.second;
-    if (serv_it->second.first.empty()) {
+    ConnectionInfo info = conn_it->second;
+    seq_to_conn.erase(conn_it);
+    seq_to_servers.erase(seq);
+    auto ret = seq_to_starttime.erase(seq_to_starttime.find(seq));
+
+    if (servers.first.empty()) {
         std::cout << "File " << cmd.data << " too big\n";
-        seq_to_conn.erase(conn_it);
-        seq_to_servers.erase(serv_it);
-        return;
+        return ret;
     }
-    cmd.addr = std::get<0>(serv_it->second.first[serv_it->second.first.size() - 1]);
-    serv_it->second.first.pop_back();
-    send_cmd(cmd, conn_it->second.sock_fd);
+    cmd.addr = std::get<0>(servers.first[servers.first.size() - 1]);
+    cmd.cmd_seq = get_cmd_seq();
+    servers.first.pop_back();
+    send_cmd(cmd, info.sock_fd);
+    auto now = boost::posix_time::microsec_clock::local_time();
+    seq_to_conn[cmd.cmd_seq] = info;
+    seq_to_servers[cmd.cmd_seq] = std::move(servers);
+    seq_to_starttime[cmd.cmd_seq] = std::move(now);
+    return ret;
 }
 
 void upload(
@@ -304,20 +321,26 @@ void upload(
         close(fd);
         throw std::logic_error("Failed to get size of file");
     }
-    std::cerr << "File size is " << statbuf.st_size <<"\n";
     cmd.param = statbuf.st_size;
     std::vector<std::string> tmp;
-    boost::split(tmp, filename, [](char c){ return c == '/';});
+    boost::split(tmp, filename, [](char c) { return c == '/'; });
     cmd.data = tmp[tmp.size() - 1];
-    seq_to_conn[cmd.cmd_seq] = ConnectionInfo(boost::posix_time::microsec_clock::local_time(), sock, fd, filename, false, false);
+    auto now = boost::posix_time::microsec_clock::local_time();
+    seq_to_conn[cmd.cmd_seq] =
+        ConnectionInfo(now, sock, fd, filename, false, false, "", 0);
     seq_to_servers[cmd.cmd_seq] = {servers, cmd};
+    seq_to_starttime[cmd.cmd_seq] = now;
     handle_no_way(cmd.cmd_seq);
 }
 
 void handle_server_answer() {
     cmplx_cmd cmd;
     recv_cmd(cmd, main_socket);
-    std::cerr << "Handling server answer, cmd = " << cmd.cmd << "\n";
+    char address[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
+                  sizeof(address)) == NULL) {
+        throw std::logic_error("inet_ntop failed unexpectedly");
+    }
     if (seq_to_conn.find(cmd.cmd_seq) != seq_to_conn.end()) {
         ConnectionInfo &info = seq_to_conn[cmd.cmd_seq];
         if (info.writing == true) {
@@ -339,22 +362,22 @@ void handle_server_answer() {
                 }
                 struct sockaddr_in remote_address = cmd.addr;
                 remote_address.sin_port = htons(cmd.param);
-                std::cerr << "Connecting new socket to port "
-                          << cmd.param << "\n";
                 connect(new_socket, (struct sockaddr *)(&remote_address),
                         sizeof(remote_address));
 
                 fds.push_back({new_socket, POLLIN, 0});
                 connections.emplace_back(
                     boost::posix_time::microsec_clock::local_time(),
-                    new_socket, info.fd, cmd.data, true, info.writing);
+                    new_socket, info.fd, cmd.data, true, info.writing, address,
+                    cmd.param);
                 seq_to_conn.erase(cmd.cmd_seq);
                 return;
             }
         }
         else {
             if (cmd.cmd == CAN_ADD && cmd.data.empty()) {
-                int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+                int new_socket =
+                    socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
                 struct sockaddr_in local_address;
                 local_address.sin_family = AF_INET;
                 local_address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -366,13 +389,13 @@ void handle_server_answer() {
                 }
                 struct sockaddr_in remote_address = cmd.addr;
                 remote_address.sin_port = htons(cmd.param);
-                std::cerr << "Connecting new socket to port " << cmd.param << "\n";
                 connect(new_socket, (struct sockaddr *)(&remote_address),
                         sizeof(remote_address));
                 fds.push_back({new_socket, POLLOUT, 0});
                 connections.emplace_back(
                     boost::posix_time::microsec_clock::local_time(),
-                    new_socket, info.fd, cmd.data, true, info.writing);
+                    new_socket, info.fd, cmd.data, true, info.writing, address,
+                    cmd.param);
                 seq_to_conn.erase(cmd.cmd_seq);
                 return;
             }
@@ -381,11 +404,6 @@ void handle_server_answer() {
                 return;
             }
         }
-    }
-    char address[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
-                  sizeof(address)) == NULL) {
-        throw std::logic_error("inet_ntop failed unexpectedly");
     }
     std::cerr << "[PCKG ERROR]  Skipping invalid package from " << address
               << ":" << ntohs(cmd.addr.sin_port) << ".\n";
@@ -518,10 +536,16 @@ void write_to_fd(int i) {
     if (info.position == info.buf_size) {
         info.buf_size = read(info.fd, info.buffer, sizeof(info.buffer));
         if (info.buf_size < 0) {
+            std::cout << "File " << info.filename << " uploading failed ("
+                      << info.ip << ":" << info.port
+                      << ") Read from disk failed with \"" << strerror(errno)
+                      << "\" error\n";
             remove_connection(i);
-            throw std::runtime_error("Failed to read requested file");
+            return;
         }
         if (info.buf_size == 0) {
+            std::cout << "File " << info.filename << " uploaded (" << info.ip
+                      << ":" << info.port << ")\n";
             remove_connection(i);
             return;
         }
@@ -530,8 +554,12 @@ void write_to_fd(int i) {
     len = write(info.sock_fd, info.buffer + info.position,
                 info.buf_size - info.position);
     if (len < 0) {
+        std::cout << "File " << info.filename << " uploading failed ("
+                  << info.ip << ":" << info.port
+                  << ") Write to socket failed with \"" << strerror(errno)
+                  << "\" error\n";
         remove_connection(i);
-        throw std::runtime_error(std::string("Failed to send requested file ") + strerror(errno));
+        return;
     }
     info.position += len;
 }
@@ -541,19 +569,32 @@ void read_from_fd(int i) {
     int len;
     len = read(info.sock_fd, info.buffer, sizeof(info.buffer));
     if (len < 0) {
+        std::cout << "File " << info.filename << " downloading failed ("
+                  << info.ip << ":" << info.port
+                  << ") Read from socket failed with \"" << strerror(errno)
+                  << "\" error\n";
         remove_connection(i);
-        throw std::runtime_error("Failed to receive requested file");
+        return;
     }
     if (len == 0) {
+        std::cout << "File " << info.filename << " downloaded (" << info.ip
+                  << ":" << info.port << ")\n";
         remove_connection(i);
         return;
     }
     len = write(info.fd, info.buffer, len);
     if (len < 0) {
+        std::cout << "File " << info.filename << " downloading failed ("
+                  << info.ip << ":" << info.port
+                  << ") Write to disk failed with \"" << strerror(errno)
+                  << "\" error\n";
         remove_connection(i);
-        throw std::runtime_error("Failed to write file on the disk");
+        return;
     }
 }
+
+// TODO jesli serwer nie odpowiedzial na ADD w zaden sposob, to nadal trzeba
+// jeszcze raz sprobowac, do nastepnego serwera cos wyslac
 
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
@@ -563,18 +604,31 @@ int main(int argc, char **argv) {
     struct sockaddr_in remote_address =
         get_remote_address(mcast_addr, cmd_port);
 
-    int timeout_millis = compute_timeout(connections, timeout);
+    int timeout_millis =
+        compute_timeout(connections, seq_to_starttime, timeout);
     while (true) {
         int ready = poll(fds.data(), fds.size(), timeout_millis);
         auto now = boost::posix_time::microsec_clock::local_time();
+        for (size_t i = fds.size() - 1; i >= 3; --i) {
+            auto info = connections[i - 3];
+            auto duration = now - connections[i - 3].start;
+            if (duration.total_microseconds() / 1000000 > timeout) {
+                remove_connection(i);
+            }
+        }
+        for (auto start = seq_to_starttime.begin();
+             start != seq_to_starttime.end();) {
+            auto duration = now - start->second;
+            if (duration.total_microseconds() / 1000000 > timeout) {
+                // this invalidates iterator of the loop, so
+                start = handle_no_way(start->first);
+            }
+            else {
+                start++;
+            }
+        }
         if (ready <= 0) {
             // timeout
-            for (size_t i = fds.size() - 1; i >= 2; --i) {
-                auto duration = connections[i - 2].start - now;
-                if (duration.total_microseconds() / 1000000 > timeout) {
-                    remove_connection(i);
-                }
-            }
             continue;
         }
         try {
@@ -608,6 +662,7 @@ int main(int argc, char **argv) {
                 std::cerr << "Error occured: " << e.what() << "\n";
             }
         }
-        timeout_millis = compute_timeout(connections, timeout);
+        timeout_millis =
+            compute_timeout(connections, seq_to_starttime, timeout);
     }
 }
