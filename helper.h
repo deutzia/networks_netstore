@@ -78,7 +78,7 @@ void send_cmd(const cmplx_cmd &cmd, int sock);
 // if the command received was simpl_cmd, then param is equal to 0
 void recv_cmd(cmplx_cmd &cmd, int sock);
 
-int64_t get_cmd_seq();
+uint64_t get_cmd_seq();
 
 // timeout in seconds
 int compute_timeout(const std::vector<ConnectionInfo> &connections,

@@ -311,7 +311,7 @@ void reply_add(int sock, const cmplx_cmd &cmd,
         throw std::logic_error("Failed to get port of the new socket");
     }
 
-    cmplx_cmd reply{CAN_ADD, cmd.cmd_seq, local_address.sin_port, cmd.data,
+    cmplx_cmd reply{CAN_ADD, cmd.cmd_seq, ntohs(local_address.sin_port), "",
                     cmd.addr};
     max_space -= cmd.param;
     files.push_back(cmd.data);
@@ -354,12 +354,13 @@ void write_to_fd(int i) {
             remove_connection(i);
             return;
         }
+        info.position = 0;
     }
     len = write(info.sock_fd, info.buffer + info.position,
                 info.buf_size - info.position);
     if (len < 0) {
         remove_connection(i);
-        throw std::runtime_error("Failed to send requested file");
+        throw std::runtime_error(std::string("Failed to send requested file ") + strerror(errno));
     }
     info.position += len;
 }

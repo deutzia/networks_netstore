@@ -121,7 +121,7 @@ void recv_cmd(cmplx_cmd &cmd, int sock) {
     }
 }
 
-int64_t get_cmd_seq() {
+uint64_t get_cmd_seq() {
     static std::random_device rd;
     static std::mt19937_64 rng(rd());
     return rng();
