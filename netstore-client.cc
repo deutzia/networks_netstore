@@ -76,8 +76,6 @@ void remove_connection(int i) {
 }
 
 void handle_interrupt() {
-    std::cerr << "Received SIGINT, exiting\n";
-
     free_memory();
 
     exit(EXIT_INTERRUPT);
@@ -640,6 +638,21 @@ int main(int argc, char **argv) {
             auto info = connections[i - 3];
             auto duration = now - connections[i - 3].start;
             if (duration.total_milliseconds() / 1000 > timeout) {
+                ConnectionInfo &info = connections[i - 3];
+                if (fds[i].events & POLLIN) {
+                    // timeout on fetching file
+                    std::cout << "File " << info.filename
+                              << " downloading failed (" << info.ip << ":"
+                              << info.port
+                              << ") Timeout waiting for server to send data\n";
+                }
+                else {
+                    // timeut on uploading file
+                    std::cout
+                        << "File " << info.filename << " uploading failed ("
+                        << info.ip << ":" << info.port
+                        << ") Timeout waiting for server to receive data\n";
+                }
                 remove_connection(i);
             }
         }

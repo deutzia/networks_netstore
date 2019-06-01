@@ -33,6 +33,8 @@ ${STUDENT}.tar.gz: ${SOURCES}
 clean:
 		@rm -f $(OBJS) netstore-client netstore-server
 		@rm -rf .d/
+		@rm -rf ${STUDENT}
+		@rm ${STUDENT}.tar.gz
 
 $(DEPDIR)/%.d: ;
 .PRECIOUS: $(DEPDIR)/%.d

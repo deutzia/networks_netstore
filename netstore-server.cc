@@ -38,8 +38,6 @@ void remove_connection(int i) {
 }
 
 void handle_interrupt() {
-    std::cerr << "Received SIGINT, exiting\n";
-
     close(fds[0].fd);
     close(fds[1].fd);
     for (const auto &conn : connections) {
@@ -385,7 +383,7 @@ void read_from_fd(int i) {
     len = write(info.fd, info.buffer, len);
     if (len < 0) {
         remove_connection(i);
-        throw std::runtime_error("Failed to write fileon the disk");
+        throw std::runtime_error("Failed to write file on the disk");
     }
 }
 
