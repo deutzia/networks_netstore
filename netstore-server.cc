@@ -22,6 +22,7 @@ const int64_t MAX_SPACE_DEFAULT = 52428800;
 std::string mcast_addr, shrd_fldr;
 int32_t cmd_port, timeout = TIMEOUT_DEFAULT;
 int64_t max_space = MAX_SPACE_DEFAULT;
+bool synchronized;
 
 std::vector<std::string> files;
 
@@ -414,7 +415,10 @@ void init(int argc, char **argv) {
         ",b", po::value<int64_t>(&max_space),
         "MAX_SPACE")(",f", po::value<std::string>(&shrd_fldr)->required(),
                      "SHRD_FLDR")(",t", po::value<int32_t>(&timeout),
-                                  "TIMEOUT (range [1, 300], default 5)");
+                                  "TIMEOUT (range [1, 300], default 5)")(
+        ",s", po::value<bool>(&synchronized),
+        "SYNCHRONIZED (1 to run in synchronized mode, 0 for normal - "
+        "default)");
 
     try {
         parse_args(argc, argv, desc);
