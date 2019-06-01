@@ -1,5 +1,5 @@
 #include <boost/algorithm/string.hpp>
-#include <boost/date_time/posix_time/posix_time_types.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/program_options.hpp>
 #include <errno.h>
 #include <fcntl.h>
@@ -32,18 +32,27 @@ std::vector<struct pollfd> fds;
 std::vector<ConnectionInfo> connections;
 std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>> files;
 std::map<uint64_t, ConnectionInfo> seq_to_conn;
-std::map<uint64_t,
-         std::pair<
-             std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>>,
-             cmplx_cmd>>
+std::map<uint64_t, std::pair<std::vector<std::tuple<struct sockaddr_in,
+                                                    std::string, uint64_t>>,
+                             cmplx_cmd>>
     seq_to_servers;
 
-std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>> servers;
+std::vector<std::tuple<struct sockaddr_in, std::string, uint64_t>> servers;
 
 // only ADD commands go here, so when they time out, because timeout after
-// sending ADD toone server is equivalent to receiving NO_WAY from that server
+// sending ADD to one server is equivalent to receiving NO_WAY from that server
 // and should be handled accordingly
 std::map<uint64_t, boost::posix_time::ptime> seq_to_starttime;
+
+// list of files to send after pseudo-discover finishes
+std::vector<std::string> files_to_upload;
+// start time of last discover or not_a_datetime if no discover is running
+boost::posix_time::ptime discover_start;
+// output of pseudo-discover
+std::vector<std::tuple<struct sockaddr_in, std::string, uint64_t>>
+    discovered_servers;
+// cmd_seq of pseudo_discover
+uint64_t discover_seq;
 
 void free_memory() {
     close(fds[0].fd);
@@ -107,9 +116,9 @@ struct sockaddr_in get_remote_address(const std::string &colon_address,
 
 // returns servers, where first is sockaddr, and second is mcast_addr and third
 // is their free space
-std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>>
+std::vector<std::tuple<struct sockaddr_in, std::string, uint64_t>>
 discover(int sock, const struct sockaddr_in &remote_address) {
-    std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>> result;
+    std::vector<std::tuple<struct sockaddr_in, std::string, uint64_t>> result;
     simpl_cmd cmd;
     cmd.cmd = HELLO;
     cmd.cmd_seq = get_cmd_seq();
@@ -298,15 +307,8 @@ auto handle_no_way(uint64_t seq) {
 
 void upload(
     int sock,
-    std::vector<std::tuple<struct sockaddr_in, std::string, int64_t>> servers,
+    std::vector<std::tuple<struct sockaddr_in, std::string, uint64_t>> servers,
     const std::string &filename) {
-
-    std::sort(
-        servers.begin(), servers.end(),
-        [](const std::tuple<struct sockaddr_in, std::string, int64_t> &a,
-           const std::tuple<struct sockaddr_in, std::string, int64_t> &b) {
-            return std::get<2>(a) < std::get<2>(b);
-        });
 
     cmplx_cmd cmd;
     cmd.cmd = ADD;
@@ -328,7 +330,7 @@ void upload(
     auto now = boost::posix_time::microsec_clock::local_time();
     seq_to_conn[cmd.cmd_seq] =
         ConnectionInfo(now, sock, fd, filename, false, false, "", 0);
-    seq_to_servers[cmd.cmd_seq] = {servers, cmd};
+    seq_to_servers[cmd.cmd_seq] = std::make_pair(servers, cmd);
     seq_to_starttime[cmd.cmd_seq] = now;
     handle_no_way(cmd.cmd_seq);
 }
@@ -340,6 +342,13 @@ void handle_server_answer() {
     if (inet_ntop(AF_INET, (void *)(&cmd.addr.sin_addr), address,
                   sizeof(address)) == NULL) {
         throw std::logic_error("inet_ntop failed unexpectedly");
+    }
+    if (discover_seq == cmd.cmd_seq) {
+        if (cmd.cmd == GOOD_DAY) {
+            // this is an answer to pre-run discover
+            discovered_servers.emplace_back(cmd.addr, cmd.data, cmd.param);
+            return;
+        }
     }
     if (seq_to_conn.find(cmd.cmd_seq) != seq_to_conn.end()) {
         ConnectionInfo &info = seq_to_conn[cmd.cmd_seq];
@@ -394,9 +403,11 @@ void handle_server_answer() {
                 fds.push_back({new_socket, POLLOUT, 0});
                 connections.emplace_back(
                     boost::posix_time::microsec_clock::local_time(),
-                    new_socket, info.fd, cmd.data, true, info.writing, address,
+                    new_socket, info.fd, info.filename, true, info.writing, address,
                     cmd.param);
                 seq_to_conn.erase(cmd.cmd_seq);
+                seq_to_starttime.erase(cmd.cmd_seq);
+                seq_to_servers.erase(cmd.cmd_seq);
                 return;
             }
             else if (cmd.cmd == NO_WAY && cmd.data == info.filename) {
@@ -408,6 +419,26 @@ void handle_server_answer() {
     std::cerr << "[PCKG ERROR]  Skipping invalid package from " << address
               << ":" << ntohs(cmd.addr.sin_port) << ".\n";
     return;
+}
+
+void pseudo_discover(int sock, const std::string &filename) {
+    // check whether file exists
+    int fd = open(filename.c_str(), O_RDONLY);
+    if (fd < 0) {
+        std::cout << "File " << filename << " does not exist\n";
+        return;
+    }
+    close(fd);
+    if (discover_start.is_not_a_date_time()) {
+        simpl_cmd cmd;
+        cmd.cmd = HELLO;
+        cmd.cmd_seq = get_cmd_seq();
+        cmd.addr = get_remote_address(mcast_addr, cmd_port);
+        send_cmd(cmd, sock);
+        discover_start = boost::posix_time::microsec_clock::local_time();
+        discover_seq = cmd.cmd_seq;
+    }
+    files_to_upload.push_back(filename);
 }
 
 void handle_user_input(const struct sockaddr_in &remote_address) {
@@ -467,7 +498,7 @@ void handle_user_input(const struct sockaddr_in &remote_address) {
     else if (boost::iequals(line.substr(0, UPLOAD.size()), UPLOAD) &&
              line.size() >= UPLOAD.size() + 2 && line[UPLOAD.size()] == ' ') {
         std::string needle = line.substr(UPLOAD.size() + 1, line.size());
-        upload(main_socket, servers, needle);
+        pseudo_discover(main_socket, needle);
     }
     else if (boost::iequals(line.substr(0, REMOVE.size()), REMOVE) &&
              line.size() >= REMOVE.size() + 2 && line[REMOVE.size()] == ' ') {
@@ -593,9 +624,6 @@ void read_from_fd(int i) {
     }
 }
 
-// TODO jesli serwer nie odpowiedzial na ADD w zaden sposob, to nadal trzeba
-// jeszcze raz sprobowac, do nastepnego serwera cos wyslac
-
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
@@ -612,19 +640,39 @@ int main(int argc, char **argv) {
         for (size_t i = fds.size() - 1; i >= 3; --i) {
             auto info = connections[i - 3];
             auto duration = now - connections[i - 3].start;
-            if (duration.total_microseconds() / 1000000 > timeout) {
+            if (duration.total_milliseconds() / 1000 > timeout) {
                 remove_connection(i);
             }
         }
         for (auto start = seq_to_starttime.begin();
              start != seq_to_starttime.end();) {
             auto duration = now - start->second;
-            if (duration.total_microseconds() / 1000000 > timeout) {
-                // this invalidates iterator of the loop, so
+            if (duration.total_milliseconds() / 1000 > timeout) {
+                // this invalidates iterator of the loop, so we need to
+                // manually handle iterators
                 start = handle_no_way(start->first);
             }
             else {
                 start++;
+            }
+        }
+        if (!discover_start.is_not_a_date_time()) {
+            auto duration = now - discover_start;
+            if (duration.total_milliseconds() / 1000 > timeout) {
+                std::sort(discovered_servers.begin(), discovered_servers.end(),
+                          [](const std::tuple<struct sockaddr_in, std::string,
+                                              uint64_t> &a,
+                             const std::tuple<struct sockaddr_in, std::string,
+                                              uint64_t> &b) {
+                              return std::get<2>(a) < std::get<2>(b);
+                          });
+
+                for (const auto &filename : files_to_upload) {
+                    upload(main_socket, discovered_servers, filename);
+                }
+                files_to_upload.clear();
+                discover_start = boost::posix_time::ptime();
+                discovered_servers.clear();
             }
         }
         if (ready <= 0) {
@@ -664,5 +712,12 @@ int main(int argc, char **argv) {
         }
         timeout_millis =
             compute_timeout(connections, seq_to_starttime, timeout);
+        if (!discover_start.is_not_a_date_time()) {
+            auto duration = now - discover_start;
+            int new_timeout = timeout * 1000 - duration.total_milliseconds();
+            if (timeout_millis == -1 || timeout_millis < new_timeout) {
+                timeout_millis = new_timeout;
+            }
+        }
     }
 }

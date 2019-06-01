@@ -248,8 +248,6 @@ void reply_get(int sock, const cmplx_cmd &cmd,
         close(new_socket);
         throw std::logic_error("Failed to open requested file");
     }
-    std::cout << "Waiting for new connection on port "
-              << ntohs(local_address.sin_port) << "\n";
     send_cmd(reply, sock);
     fds.push_back({new_socket, POLLIN, 0});
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
@@ -408,9 +406,6 @@ void init(int argc, char **argv) {
     try {
         parse_args(argc, argv, desc);
         files = list_files();
-        for (const auto &file : files) {
-            std::cout << file << "\n";
-        }
         sigset_t mask;
         sigemptyset(&mask);
         sigaddset(&mask, SIGINT);
@@ -454,7 +449,6 @@ int main(int argc, char **argv) {
             for (size_t i = fds.size() - 1; i >= 2; --i) {
                 auto duration = now - connections[i - 2].start;
                 if (duration.total_microseconds() / 1000000 > timeout) {
-                    std::cerr << "Removing connection " << i << "\n";
                     remove_connection(i);
                 }
             }
