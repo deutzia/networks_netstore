@@ -1,5 +1,6 @@
 #include "helper.h"
 
+#include <boost/algorithm/string.hpp>
 #include <endian.h>
 #include <errno.h>
 #include <random>
@@ -152,4 +153,10 @@ int compute_timeout(const std::vector<ConnectionInfo> &connections,
         return 0;
     }
     return new_timeout;
+}
+
+std::string get_name_from_path(const std::string &path) {
+    std::vector<std::string> tmp;
+    boost::split(tmp, path, [](char c) { return c == '/'; });
+    return tmp[tmp.size() - 1];
 }

@@ -324,9 +324,7 @@ void upload(
         throw std::logic_error("Failed to get size of file");
     }
     cmd.param = statbuf.st_size;
-    std::vector<std::string> tmp;
-    boost::split(tmp, filename, [](char c) { return c == '/'; });
-    cmd.data = tmp[tmp.size() - 1];
+    cmd.data = get_name_from_path(filename);
     auto now = boost::posix_time::microsec_clock::local_time();
     seq_to_conn[cmd.cmd_seq] =
         ConnectionInfo(now, sock, fd, filename, false, false, "", 0);
@@ -403,14 +401,15 @@ void handle_server_answer() {
                 fds.push_back({new_socket, POLLOUT, 0});
                 connections.emplace_back(
                     boost::posix_time::microsec_clock::local_time(),
-                    new_socket, info.fd, info.filename, true, info.writing, address,
-                    cmd.param);
+                    new_socket, info.fd, info.filename, true, info.writing,
+                    address, cmd.param);
                 seq_to_conn.erase(cmd.cmd_seq);
                 seq_to_starttime.erase(cmd.cmd_seq);
                 seq_to_servers.erase(cmd.cmd_seq);
                 return;
             }
-            else if (cmd.cmd == NO_WAY && cmd.data == info.filename) {
+            else if (cmd.cmd == NO_WAY &&
+                     cmd.data == get_name_from_path(info.filename)) {
                 handle_no_way(cmd.cmd_seq);
                 return;
             }

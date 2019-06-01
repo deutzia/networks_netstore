@@ -86,3 +86,5 @@ uint64_t get_cmd_seq();
 int compute_timeout(const std::vector<ConnectionInfo> &connections,
                     const std::map<uint64_t, boost::posix_time::ptime> &starts,
                     int timeout);
+
+std::string get_name_from_path(const std::string &path);
