@@ -1,6 +1,7 @@
 #include "helper.h"
 
 #include <boost/algorithm/string.hpp>
+#include <boost/program_options.hpp>
 #include <endian.h>
 #include <errno.h>
 #include <random>
@@ -159,4 +160,79 @@ std::string get_name_from_path(const std::string &path) {
     std::vector<std::string> tmp;
     boost::split(tmp, path, [](char c) { return c == '/'; });
     return tmp[tmp.size() - 1];
+}
+
+std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
+search(int sock, const struct sockaddr_in &remote_address,
+       const std::string &needle, int32_t timeout) {
+    std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
+        result;
+    simpl_cmd cmd;
+    cmd.cmd = LIST;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.addr = remote_address;
+    cmd.data = needle;
+    send_cmd(cmd, sock);
+
+    cmplx_cmd reply;
+    struct timeval tval;
+    auto start = boost::posix_time::microsec_clock::local_time();
+    do {
+        tval.tv_sec = timeout;
+        tval.tv_usec = 0;
+        auto elapsed = boost::posix_time::microsec_clock::local_time() - start;
+        int64_t total_microsec = elapsed.total_microseconds();
+        tval.tv_sec -= total_microsec / 1000000;
+        if (tval.tv_sec < 0) {
+            break;
+        }
+
+        if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (void *)&tval,
+                       sizeof(tval)) < 0) {
+            throw std::logic_error("setsockopt " + std::to_string(errno) +
+                                   " " + strerror(errno));
+        }
+        try {
+            recv_cmd(reply, sock);
+            char address[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, (void *)(&reply.addr.sin_addr), address,
+                          sizeof(address)) == NULL) {
+                throw std::logic_error("this should not be happening");
+            }
+
+            if (reply.cmd_seq != cmd.cmd_seq) {
+                std::cerr << "[PCKG ERROR]  Skipping invalid package from "
+                          << address << ":" << reply.addr.sin_port
+                          << "(invalid cmd_seq)\n";
+                continue;
+            }
+            if (reply.cmd != MY_LIST) {
+                std::cerr << "[PCKG ERROR]  Skipping invalid package from "
+                          << address << ":" << reply.addr.sin_port
+                          << "(command is not MY_LIST when it should)\n";
+                continue;
+            }
+            std::vector<std::string> tmp;
+            boost::split(tmp, reply.data, [](char c) { return c == '\n'; });
+            result.emplace_back(reply.addr, tmp);
+        }
+        catch (ReceiveTimeOutException &e) {
+            break;
+        }
+    } while (true);
+    return result;
+}
+
+struct sockaddr_in get_remote_address(const std::string &colon_address,
+                                      in_port_t port) {
+    struct sockaddr_in remote_address;
+    remote_address.sin_family = AF_INET;
+    if (inet_pton(AF_INET, colon_address.c_str(), &remote_address.sin_addr) <
+        0) {
+        throw boost::program_options::validation_error(
+            boost::program_options::validation_error::invalid_option_value,
+            "g", colon_address);
+    }
+    remote_address.sin_port = htons(port);
+    return remote_address;
 }

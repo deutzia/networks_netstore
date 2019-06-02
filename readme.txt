@@ -26,16 +26,19 @@ pierwsza propozycja to - nie udostępnia ich, traktuje je, jakby ich nie było
 (co też znaczy, że nie usuwa ich przy DEL). To może powodować jednak
 nadpisanie tych plików, jeśli odłączy się serwer, który je miał. Druga
 propozycja, to przełożyć pliki do jakiegoś katalogu, ale wydaje mi się, że to
-może być dla użytkownika bardzo konfundujące. Trzecia, na którą się
+może być dla użytkownika bardzo nieoczekiwane. Trzecia, na którą się
 zdecydowałam, to kazać użytkownikowi to naprawić, a więc wypisać odpowiedni
 komuniat o błędzie i zakończyć działanie.
+Ze względu na to, że to jest część "wstawania" serwera, jest to wykonywane w
+sposób blokujący, tzn serwer potrzebuje ponad timeout sekund zanim będzie
+dostępny.
 Dodatkowo także serwer musi także poinformować inne serwery o tym, jakie ma
 pliki. W tym celu wysyła im simpl_cmd o polu CMD = "JOINING" i polu data
 składającym się z nazw plików oddzielonych znakami nowej linii (być może
 wysyła wiele razy, tak, jak przy wysyłaniu MY_LIST).
 
-2) DEL wysyłane jest na adres multicast, a więc serwer usuwa plik nie swojego
-dysku, ale także z listy plików posiadanych przez inne serwery.
+2) DEL wysyłane jest na adres multicast, a więc serwer usuwa plik nie tylko ze
+swojego dysku, ale także z listy plików posiadanych przez inne serwery.
 
 3) Przed wysłaniem zgody na dodanie pliku serwer sprawdza, czy jakiś inny
 serwer nie ma pliku o podanej nazwie i jeśli tak jest, to odpowiada NO_WAY
@@ -56,6 +59,18 @@ Trzecią popozycją jest więc, żeby serwer na wszelki wypadek wysyłał do inn
 DEL. Wówczas we wskazanej przeze mnie sytuacji w pierwszej propozycji oba
 serwery wyślą DEL do pozostałych, a więc ostatecznie żaden z nich nie będzie
 miał tego pliku.
+Serwer musi także poinformować pozostałe, że ma taki plik (DEL jest
+nierozróżnialne od komendy DEL otrzymanej od jakiegoś klienta). Zauważmy
+jednak, że skoro serwer informuje o tym, że dostał nowy plik, to nie musi
+wysyłać DEL do innych - wystarczy, że w obsłudze informacji o tym, że inny
+serwer dostał plik, dany plik zostanie usunięty z obecnego serwera. Stąd
+wystarczy tylko informować o dodawaniu pliku u siebie. W tym celui serwer
+wysyła simpl_cmd o polu CMD = "ADDING" i nazwą pliku w polu data.
+Trzeba także obsłużyć sytuację, kiedy odbieranie pliku od klienta się nie uda.
+Należy poinformować inne serwery o tym, że jednak nie ma się takiego pliku.
+Zauważmy jednak, że z założenia, że plik występuje tylko raz, tzn inne serwery
+go nie przyjmą, jeśli obecny już ich poinformował, że taki plik posiada. Z
+tego powodu wystarczy wysłać DEL zgodnie z formatem z treści zadania.
 
 4) W momencie odłączania się serwera od grupy musi on poinformować pozostałe
 serwery o tym, że się odłącza. W tym cely wysyła im simpl_cmd o polu CMD =

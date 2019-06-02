@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <errno.h>
@@ -26,6 +27,10 @@ bool synchronized;
 
 std::vector<std::string> files;
 
+// used only when running in synchronised mode
+std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
+    others_files;
+
 // 0 is signalfd
 // 1 is udp socket for most of communications
 // 2+ are sockets for connections with specific clients
@@ -51,9 +56,28 @@ void handle_read_from_socket_fail(const std::string &filename) {
             break;
         }
     }
+    if (synchronized) {
+        send_cmd(simpl_cmd{DEL, get_cmd_seq(), filename,
+                           get_remote_address(mcast_addr, cmd_port)},
+                 fds[1].fd);
+    }
+}
+
+inline bool operator==(const sockaddr_in &a, const sockaddr_in &b) {
+    return a.sin_family == b.sin_family && a.sin_port == b.sin_port &&
+           a.sin_addr.s_addr == b.sin_addr.s_addr;
+}
+
+inline bool operator!=(const sockaddr_in &a, const sockaddr_in &b) {
+    return !(a == b);
 }
 
 void handle_interrupt() {
+    if (synchronized) {
+        send_cmd(simpl_cmd{LEAVING, get_cmd_seq(), "",
+                           get_remote_address(mcast_addr, cmd_port)},
+                 fds[1].fd);
+    }
     close(fds[0].fd);
     close(fds[1].fd);
     for (const auto &conn : connections) {
@@ -112,7 +136,7 @@ std::vector<std::string> list_files() {
 
 int connect_to_mcast(std::string mcast_addr, int32_t port) {
     /* opening a socket */
-    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         throw std::logic_error("Failed to create a socket");
     }
@@ -158,32 +182,45 @@ void reply_hello(int sock, const cmplx_cmd &cmd) {
     send_cmd(reply, sock);
 }
 
+void send_filelist(int sock, simpl_cmd cmd,
+                   const std::vector<std::string> &files,
+                   const std::string &needle) {
+    for (const auto &file : files) {
+        if (file.find(needle) != std::string::npos) {
+            if (cmd.data.size() + file.size() + (cmd.data.empty() ? 0 : 1) >
+                DATA_MAX) {
+                send_cmd(cmd, sock);
+                cmd.data = "";
+            }
+            if (!cmd.data.empty()) {
+                cmd.data += "\n";
+            }
+            cmd.data += file;
+        }
+    }
+    if (cmd.data.size() > 0) {
+        send_cmd(cmd, sock);
+    }
+}
+
 void reply_list(int sock, const cmplx_cmd &cmd,
                 const std::vector<std::string> &files) {
     simpl_cmd reply;
     reply.cmd = MY_LIST;
     reply.cmd_seq = cmd.cmd_seq;
     reply.addr = cmd.addr;
-    for (const auto &file : files) {
-        if (file.find(cmd.data) != std::string::npos) {
-            if (reply.data.size() + file.size() +
-                    (reply.data.empty() ? 0 : 1) >
-                DATA_MAX) {
-                send_cmd(reply, sock);
-                reply.data = "";
-            }
-            if (!reply.data.empty()) {
-                reply.data += "\n";
-            }
-            reply.data += file;
-        }
-    }
-    if (reply.data.size() > 0) {
-        send_cmd(reply, sock);
-    }
+    send_filelist(sock, reply, files, cmd.data);
 }
 
-void handle_del(const cmplx_cmd &cmd, std::vector<std::string> &files) {
+void send_joining(int sock, const struct sockaddr_in &remote_address) {
+    simpl_cmd cmd;
+    cmd.cmd = JOINING;
+    cmd.cmd_seq = get_cmd_seq();
+    cmd.addr = remote_address;
+    send_filelist(sock, cmd, files, "");
+}
+
+void del_from_local(const cmplx_cmd &cmd, std::vector<std::string> &files) {
     namespace fs = boost::filesystem;
     for (auto it = files.begin(); it != files.end(); ++it) {
         if (*it == cmd.data) {
@@ -198,6 +235,22 @@ void handle_del(const cmplx_cmd &cmd, std::vector<std::string> &files) {
                 files.erase(it);
             }
             return;
+        }
+    }
+}
+
+void handle_del(const cmplx_cmd &cmd, std::vector<std::string> &files) {
+    del_from_local(cmd, files);
+    if (synchronized) {
+        for (auto it = others_files.begin(); it != others_files.end(); ++it) {
+            for (auto file = it->second.begin(); file != it->second.end();) {
+                if (*file == cmd.data) {
+                    file = it->second.erase(file);
+                }
+                else {
+                    ++file;
+                }
+            }
         }
     }
 }
@@ -288,6 +341,19 @@ void reply_add(int sock, const cmplx_cmd &cmd,
         return;
     }
 
+    if (synchronized) {
+        // check whether file exists on any other server
+        for (const auto &package : others_files) {
+            for (const auto &file : package.second) {
+                if (file == cmd.data) {
+                    simpl_cmd reply{NO_WAY, cmd.cmd_seq, cmd.data, cmd.addr};
+                    send_cmd(reply, sock);
+                    return;
+                }
+            }
+        }
+    }
+
     int new_socket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     struct sockaddr_in local_address;
     local_address.sin_family = AF_INET;
@@ -329,11 +395,59 @@ void reply_add(int sock, const cmplx_cmd &cmd,
     max_space -= cmd.param;
     files.push_back(cmd.data);
     send_cmd(reply, sock);
+    if (synchronized) {
+        send_cmd(simpl_cmd{ADDING, get_cmd_seq(), cmd.data,
+                           get_remote_address(mcast_addr, cmd_port)},
+                 fds[1].fd);
+    }
     fds.push_back({new_socket, POLLIN, 0});
     filename_to_size[cmd.data] = cmd.param;
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
                              new_socket, fd, cmd.data, false, false, address,
                              ntohs(local_address.sin_port));
+}
+
+void handle_join(const cmplx_cmd &cmd) {
+    std::vector<std::string> tmp;
+    boost::split(tmp, cmd.data, [](char c) { return c == '\n'; });
+    others_files.emplace_back(cmd.addr, tmp);
+}
+
+void handle_leaving(const cmplx_cmd &cmd) {
+    if (!cmd.data.empty()) {
+        throw std::runtime_error("data is not empty when it should be");
+    }
+    for (auto it = others_files.begin(); it != others_files.end();) {
+        if (it->first == cmd.addr) {
+            it = others_files.erase(it);
+        }
+        else {
+            it++;
+        }
+    }
+}
+
+void handle_adding(const cmplx_cmd &cmd) {
+    del_from_local(cmd, files);
+    for (auto it = others_files.begin(); it != others_files.end(); ++it) {
+        if (it->first != cmd.addr) {
+            for (auto file = it->second.begin(); file != it->second.end();) {
+                if (*file == cmd.data) {
+                    file = it->second.erase(file);
+                }
+                else {
+                    ++file;
+                }
+            }
+        }
+    }
+    for (auto it = others_files.begin(); it != others_files.end(); ++it) {
+        if (it->first == cmd.addr) {
+            it->second.push_back(cmd.data);
+            return;
+        }
+    }
+    others_files.emplace_back(cmd.addr, std::vector<std::string>{cmd.data});
 }
 
 void accept_connection(int i) {
@@ -437,6 +551,27 @@ void init(int argc, char **argv) {
 
         int sock = connect_to_mcast(mcast_addr, cmd_port);
         fds.push_back({sock, POLLIN, 0});
+
+        if (synchronized) {
+            u_char loop = 0;
+            setsockopt(sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop,
+                       sizeof(loop));
+            others_files = search(
+                sock, get_remote_address(mcast_addr, cmd_port), "", timeout);
+            for (const auto &package : others_files) {
+                for (const auto &file : package.second) {
+                    for (const auto &file2 : files) {
+                        if (file == file2) {
+                            throw std::logic_error(
+                                "File " + file +
+                                " exists both on this server and on some other "
+                                "server in the group. Please fix that.");
+                        }
+                    }
+                }
+            }
+            send_joining(sock, get_remote_address(mcast_addr, cmd_port));
+        }
     }
     catch (po::error &e) {
         std::cerr << "INCORRECT USAGE\n" << e.what() << "\n" << desc;
@@ -498,6 +633,15 @@ int main(int argc, char **argv) {
                 }
                 else if (cmd.cmd == ADD) {
                     reply_add(fds[1].fd, cmd, files);
+                }
+                else if (synchronized && cmd.cmd == JOINING) {
+                    handle_join(cmd);
+                }
+                else if (synchronized && cmd.cmd == LEAVING) {
+                    handle_leaving(cmd);
+                }
+                else if (synchronized && cmd.cmd == ADDING) {
+                    handle_adding(cmd);
                 }
                 else {
                     char address[INET_ADDRSTRLEN];

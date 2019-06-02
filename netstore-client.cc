@@ -98,20 +98,6 @@ void parse_args(int argc, char **argv,
     }
 }
 
-struct sockaddr_in get_remote_address(const std::string &colon_address,
-                                      in_port_t port) {
-    struct sockaddr_in remote_address;
-    remote_address.sin_family = AF_INET;
-    if (inet_pton(AF_INET, colon_address.c_str(), &remote_address.sin_addr) <
-        0) {
-        throw boost::program_options::validation_error(
-            boost::program_options::validation_error::invalid_option_value,
-            "g", colon_address);
-    }
-    remote_address.sin_port = htons(port);
-    return remote_address;
-}
-
 // returns servers, where first is sockaddr, and second is mcast_addr and third
 // is their free space
 std::vector<std::tuple<struct sockaddr_in, std::string, uint64_t>>
@@ -149,21 +135,6 @@ discover(int sock, const struct sockaddr_in &remote_address) {
                 throw std::logic_error("this should not be happening");
             }
 
-            //                        std::cerr << "Received reply from " <<
-            //                        address << ":"
-            //                                  << ntohs(reply.addr.sin_port)
-            //                                  << " with cmd = " << reply.cmd
-            //                                  << " and seq = " <<
-            //                                  reply.cmd_seq
-            //                                  << " (original seq was " <<
-            //                                  cmd.cmd_seq <<
-            //                                  "). Data is \""
-            //                                  << reply.data << "\"(" <<
-            //                                  reply.data.size()
-            //                                  << ") and param is " <<
-            //                                  reply.param <<
-            //                                  "\n";
-
             if (reply.cmd_seq != cmd.cmd_seq) {
                 std::cerr << "[PCKG ERROR]  Skipping invalid package from "
                           << address << ":" << ntohs(reply.addr.sin_port)
@@ -177,68 +148,6 @@ discover(int sock, const struct sockaddr_in &remote_address) {
                 continue;
             }
             result.emplace_back(reply.addr, reply.data, reply.param);
-        }
-        catch (ReceiveTimeOutException &e) {
-            break;
-        }
-    } while (true);
-    return result;
-}
-
-// return pairs of <server addres, list of files there>
-std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
-search(int sock, const struct sockaddr_in &remote_address,
-       const std::string &needle) {
-    std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
-        result;
-    simpl_cmd cmd;
-    cmd.cmd = LIST;
-    cmd.cmd_seq = get_cmd_seq();
-    cmd.addr = remote_address;
-    cmd.data = needle;
-    send_cmd(cmd, sock);
-
-    cmplx_cmd reply;
-    struct timeval tval;
-    auto start = boost::posix_time::microsec_clock::local_time();
-    do {
-        tval.tv_sec = timeout;
-        tval.tv_usec = 0;
-        auto elapsed = boost::posix_time::microsec_clock::local_time() - start;
-        int64_t total_microsec = elapsed.total_microseconds();
-        tval.tv_sec -= total_microsec / 1000000;
-        if (tval.tv_sec < 0) {
-            break;
-        }
-
-        if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (void *)&tval,
-                       sizeof(tval)) < 0) {
-            throw std::logic_error("setsockopt " + std::to_string(errno) +
-                                   " " + strerror(errno));
-        }
-        try {
-            recv_cmd(reply, sock);
-            char address[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, (void *)(&reply.addr.sin_addr), address,
-                          sizeof(address)) == NULL) {
-                throw std::logic_error("this should not be happening");
-            }
-
-            if (reply.cmd_seq != cmd.cmd_seq) {
-                std::cerr << "[PCKG ERROR]  Skipping invalid package from "
-                          << address << ":" << reply.addr.sin_port
-                          << "(invalid cmd_seq)\n";
-                continue;
-            }
-            if (reply.cmd != MY_LIST) {
-                std::cerr << "[PCKG ERROR]  Skipping invalid package from "
-                          << address << ":" << reply.addr.sin_port
-                          << "(command is not MY_LIST when it should)\n";
-                continue;
-            }
-            std::vector<std::string> tmp;
-            boost::split(tmp, reply.data, [](char c) { return c == '\n'; });
-            result.emplace_back(reply.addr, tmp);
         }
         catch (ReceiveTimeOutException &e) {
             break;
@@ -339,6 +248,15 @@ void handle_server_answer() {
                   sizeof(address)) == NULL) {
         throw std::logic_error("inet_ntop failed unexpectedly");
     }
+
+    //    std::cerr << "Received package from " << address << ":"
+    //              << ntohs(cmd.addr.sin_port) << " with cmd = " << cmd.cmd
+    //              << " and seq = " << cmd.cmd_seq << ". Data is \"" <<
+    //              cmd.data
+    //              << "\"(" << cmd.data.size() << ") and param is " <<
+    //              cmd.param
+    //              << "\n";
+
     if (discover_seq == cmd.cmd_seq) {
         if (cmd.cmd == GOOD_DAY) {
             // this is an answer to pre-run discover
@@ -467,7 +385,7 @@ void handle_user_input(const struct sockaddr_in &remote_address) {
             }
             needle = line.substr(SEARCH.size() + 1, line.size());
         }
-        files = search(main_socket, remote_address, needle);
+        files = search(main_socket, remote_address, needle, timeout);
         for (const auto &package : files) {
             char address[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, (void *)(&package.first.sin_addr), address,

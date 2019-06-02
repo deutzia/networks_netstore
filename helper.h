@@ -4,6 +4,7 @@
 #include <string.h>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 const int32_t TIMEOUT_DEFAULT = 5;
 const int32_t TIMEOUT_MAX = 300;
@@ -23,6 +24,10 @@ const std::string DEL = std::string("DEL\0\0\0\0\0\0\0\0", CMD_SIZE + 1);
 const std::string ADD = std::string("ADD\0\0\0\0\0\0\0\0", CMD_SIZE + 1);
 const std::string NO_WAY = std::string("NO_WAY\0\0\0\0\0", CMD_SIZE + 1);
 const std::string CAN_ADD = std::string("CAN_ADD\0\0\0\0", CMD_SIZE + 1);
+// commands used by servers in synchronised mode
+const std::string JOINING = std::string("JOINING\0\0\0\0", CMD_SIZE + 1);
+const std::string LEAVING = std::string("LEAVING\0\0\0\0", CMD_SIZE + 1);
+const std::string ADDING = std::string("ADDING\0\0\0\0\0", CMD_SIZE + 1);
 
 class ReceiveTimeOutException : public std::exception {
   private:
@@ -88,3 +93,12 @@ int compute_timeout(const std::vector<ConnectionInfo> &connections,
                     int timeout);
 
 std::string get_name_from_path(const std::string &path);
+
+// return pairs of <server addres, list of files there>
+// blocking for timeout seconds
+std::vector<std::pair<struct sockaddr_in, std::vector<std::string>>>
+search(int sock, const struct sockaddr_in &remote_address,
+       const std::string &needle, int32_t timeout);
+
+struct sockaddr_in get_remote_address(const std::string &colon_address,
+                                      in_port_t port);
