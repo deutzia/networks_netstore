@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <iostream>
+#include <map>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -30,11 +31,25 @@ std::vector<std::string> files;
 std::vector<struct pollfd> fds;
 std::vector<ConnectionInfo> connections;
 
+// from filename to size (for files that are being read from socket)
+std::map<std::string, uint64_t> filename_to_size;
+
 void remove_connection(int i) {
     close(connections[i - 2].fd);
     close(connections[i - 2].sock_fd);
     connections.erase(connections.begin() + i - 2);
     fds.erase(fds.begin() + i);
+}
+
+void handle_read_from_socket_fail(const std::string &filename) {
+    max_space += filename_to_size[filename];
+    filename_to_size.erase(filename);
+    for (auto it = files.begin(); it != files.end(); ++it) {
+        if (*it == filename) {
+            files.erase(it);
+            break;
+        }
+    }
 }
 
 void handle_interrupt() {
@@ -67,7 +82,6 @@ void parse_args(int argc, char **argv,
         throw po::validation_error(po::validation_error::invalid_option_value,
                                    "p", std::to_string(cmd_port));
     }
-    // TODO(lab) czy liczba bajtów może być 0?
     if (max_space <= 0) {
         throw po::validation_error(po::validation_error::invalid_option_value,
                                    "b", std::to_string(max_space));
@@ -87,10 +101,9 @@ std::vector<std::string> list_files() {
             max_space -= fs::file_size(it->path());
         }
     }
-    // TODO(lab) co się powinno dziać jak mamy za mało quoty?
-    if (max_space < 0) {
+    if (max_space <= 0) {
         throw std::logic_error(
-            "MAX_SPACE is smaller than sum of sizes of files"
+            "MAX_SPACE is smaller or equal to sum of sizes of files"
             " in shared_dir");
     }
     return result;
@@ -103,8 +116,6 @@ int connect_to_mcast(std::string mcast_addr, int32_t port) {
         throw std::logic_error("Failed to create a socket");
     }
 
-    // TODO(lab) czy moga byc dwa serwery na tej samej maszynie na tym samym
-    // porcie?
     /* connecting to a local address and port */
     struct sockaddr_in local_address;
     local_address.sin_family = AF_INET;
@@ -318,6 +329,7 @@ void reply_add(int sock, const cmplx_cmd &cmd,
     files.push_back(cmd.data);
     send_cmd(reply, sock);
     fds.push_back({new_socket, POLLIN, 0});
+    filename_to_size[cmd.data] = cmd.param;
     connections.emplace_back(boost::posix_time::microsec_clock::local_time(),
                              new_socket, fd, cmd.data, false, false, address,
                              ntohs(local_address.sin_port));
@@ -373,15 +385,18 @@ void read_from_fd(int i) {
     int len;
     len = read(info.sock_fd, info.buffer, sizeof(info.buffer));
     if (len < 0) {
+        handle_read_from_socket_fail(info.filename);
         remove_connection(i);
         throw std::runtime_error("Failed to receive requested file");
     }
     if (len == 0) {
+        filename_to_size.erase(info.filename);
         remove_connection(i);
         return;
     }
     len = write(info.fd, info.buffer, len);
     if (len < 0) {
+        handle_read_from_socket_fail(info.filename);
         remove_connection(i);
         throw std::runtime_error("Failed to write file on the disk");
     }
@@ -447,6 +462,11 @@ int main(int argc, char **argv) {
             for (size_t i = fds.size() - 1; i >= 2; --i) {
                 auto duration = now - connections[i - 2].start;
                 if (duration.total_microseconds() / 1000000 > timeout) {
+                    if (fds[i].events & POLLIN) {
+                        // we were reading a file
+                        handle_read_from_socket_fail(
+                            connections[i - 2].filename);
+                    }
                     remove_connection(i);
                 }
             }
